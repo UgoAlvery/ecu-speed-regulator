@@ -1,0 +1,13 @@
+# ESP-IDF build artifacts
+build/
+sdkconfig.old
+dependencies.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
