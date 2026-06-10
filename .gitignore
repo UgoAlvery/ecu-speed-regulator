@@ -11,3 +11,5 @@ dependencies.lock
 # OS
 .DS_Store
 Thumbs.db
+cmake-build-debug/
+cmake-build-release/
