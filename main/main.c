@@ -27,7 +27,7 @@
 #define STACK_FAILSAFE_WORDS    2048u
 #define STACK_RX_WORDS          4096u
 #define STACK_CONTROL_WORDS     4096u
-#define STACK_TX_WORDS          2048u
+#define STACK_TX_WORDS          4096u
 #define STACK_TELEMETRY_WORDS   2048u
 
 static const char *TAG = "main";

@@ -41,7 +41,7 @@ static void uart_init(void)
 
     uart_driver_install(UART_NUM, UART_BUF_SIZE * 2, 0, 0, NULL, 0);
     uart_param_config(UART_NUM, &cfg);
-    uart_set_pin(UART_NUM, TXD_PIN, RXD_PIN,
+    uart_set_pin(UART_NUM, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE,
                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 }
 

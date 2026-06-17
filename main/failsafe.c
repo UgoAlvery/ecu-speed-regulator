@@ -16,6 +16,20 @@ static SemaphoreHandle_t s_sem_failsafe = NULL;
 static QueueHandle_t     s_tx_queue     = NULL;
 
 
+/* Émet une trame OUTPUT (payload brut, task_tx encode). Utilisé au failsafe
+ * pour annoncer explicitement la coupure moteur sur le bus : l'arrêt est
+ * ainsi observable côté superviseur, pas seulement appliqué en interne. */
+static void send_motor_output(const float output)
+{
+    tx_message_t msg;
+    msg.type        = MSG_OUTPUT;
+    memcpy(msg.payload, &output, sizeof(float));
+    msg.payload_len = (uint16_t)sizeof(float);
+
+    xQueueSend(s_tx_queue, &msg, 0);
+}
+
+
 static void send_alarm(const char *cause)
 {
     /* task_tx est le SEUL encodeur : on lui transmet le payload BRUT. */
@@ -39,6 +53,7 @@ static void trigger_failsafe(const char *cause)
     ecu_state_set_output(0.0f);
     ecu_state_set_mode(ECU_MODE_OFF);
 
+    send_motor_output(0.0f);   /* coupure moteur explicite et observable */
     send_alarm(cause);
 }
 
