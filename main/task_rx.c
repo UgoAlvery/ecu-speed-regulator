@@ -1,11 +1,11 @@
 #include "task_rx.h"
 #include "protocol.h"
+#include "ecu_state.h"
 #include <string.h>
 
 #include "driver/uart.h"
 
 #define PARSER_TIMEOUT_MS 50
-#define FRAME_TIMEOUT_MS 2000
 
 typedef enum {
     STATE_WAIT_START,
@@ -16,7 +16,7 @@ typedef enum {
 
 typedef struct {
     parser_state_t state;
-    uint8_t buf[PROTOCOL_MAX_PAYLOAD_SIZE];
+    uint8_t buf[PROTOCOL_MAX_FRAME_SIZE];   /* trame complète, pas juste le payload */
     size_t buf_idx;
     uint16_t len_field;
     uint8_t len_bytes_read;
@@ -135,6 +135,7 @@ void task_rx(void *pvParameters) {
             const bool frame_ready = parser_feed_byte(&s_parser, byte, &frame);
             if (frame_ready) {
                 s_count_valid++;
+                ecu_state_set_last_rx_tick(xTaskGetTickCount());
                 if (xQueueSend(s_rx_queue, &frame, 0) != pdTRUE) {
                     s_count_dropped++;
                 }

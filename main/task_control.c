@@ -5,6 +5,7 @@
 #include "ecu_state.h"
 #include "pid.h"
 #include "protocol.h"
+#include "task_tx.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -156,26 +157,11 @@ static void run_pid_and_emit(pid_t *pid)
 
 static bool enqueue_output(const float output)
 {
-    static uint8_t frame_buf[PROTOCOL_MAX_FRAME_SIZE];
-
-    uint8_t payload[sizeof(float)];
-    memcpy(payload, &output, sizeof(float));
-
-    const size_t frame_len = protocol_encode(frame_buf, MSG_OUTPUT,
-                                       payload, (uint16_t)sizeof(float));
-    if (frame_len == 0) {
-        ESP_LOGE(TAG, "protocol_encode a échoué pour OUTPUT");
-        return false;
-    }
-
-    typedef struct {
-        uint8_t data[PROTOCOL_MAX_FRAME_SIZE];
-        size_t  len;
-    } tx_message_t;
-
+    /* task_tx est le SEUL encodeur : on lui transmet le payload BRUT. */
     tx_message_t msg;
-    memcpy(msg.data, frame_buf, frame_len);
-    msg.len = frame_len;
+    msg.type        = MSG_OUTPUT;
+    memcpy(msg.payload, &output, sizeof(float));
+    msg.payload_len = (uint16_t)sizeof(float);
 
     return xQueueSend(s_tx_queue, &msg, TX_SEND_TIMEOUT) == pdTRUE;
 }

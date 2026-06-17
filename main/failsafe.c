@@ -1,112 +1,67 @@
-#include "failsafe.h"
+//
+// Created by ugoal on 29/05/2026.
+//
+
+#include "task_telemetry.h"
+
 
 #include <string.h>
+#include <stdint.h>
 
-#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 
-#include "ecu_state.h"
 #include "protocol.h"
+#include "ecu_state.h"
+#include "task_rx.h"
+#include "task_tx.h"
 
 
-static SemaphoreHandle_t s_sem_failsafe = NULL;
-static QueueHandle_t     s_tx_queue     = NULL;
+static QueueHandle_t s_tx_queue = NULL;
 
-
-static void send_alarm(const char *cause)
+void task_telemetry_init(const QueueHandle_t tx_queue)
 {
-    static const size_t MAX_ALARM_LEN = 64;
-
-    uint8_t frame_buf[PROTOCOL_MAX_FRAME_SIZE];
-    uint8_t payload[64];
-
-    size_t cause_len = strlen(cause);
-    if (cause_len > MAX_ALARM_LEN) {
-        cause_len = MAX_ALARM_LEN;
-    }
-    memcpy(payload, cause, cause_len);
-
-    const size_t frame_len = protocol_encode(frame_buf, MSG_ALARM, payload,
-                                       (uint16_t)cause_len);
-
-
-    typedef struct {
-        uint8_t data[PROTOCOL_MAX_FRAME_SIZE];
-        size_t  len;
-    } tx_message_t;
-
-    tx_message_t msg;
-    memcpy(msg.data, frame_buf, frame_len);
-    msg.len = frame_len;
-    xQueueSend(s_tx_queue, &msg, 0);
-}
-
-
-static void trigger_failsafe(const char *cause)
-{
-    ecu_state_set_output(0.0f);
-    ecu_state_set_mode(ECU_MODE_OFF);
-
-    send_alarm(cause);
-}
-
-static void IRAM_ATTR gpio_isr_handler(void *arg)
-{
-    (void)arg;
-
-    BaseType_t higher_priority_task_woken = pdFALSE;
-    xSemaphoreGiveFromISR(s_sem_failsafe, &higher_priority_task_woken);
-
-
-    portYIELD_FROM_ISR(higher_priority_task_woken);
-}
-
-void failsafe_init(QueueHandle_t tx_queue)
-{
+    configASSERT(tx_queue != NULL);
     s_tx_queue = tx_queue;
-
-    s_sem_failsafe = xSemaphoreCreateBinary();
-    configASSERT(s_sem_failsafe != NULL);
-
-    const gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << FAILSAFE_GPIO_PIN),
-        .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_ANYEDGE,
-    };
-    ESP_ERROR_CHECK(gpio_config(&io_conf));
-
-    ESP_ERROR_CHECK(gpio_install_isr_service(0));
-
-    ESP_ERROR_CHECK(gpio_isr_handler_add(FAILSAFE_GPIO_PIN,
-                                         gpio_isr_handler, NULL));
 }
 
-
-void task_failsafe( void *pvParameters)
+void task_telemetry(void *pvParameters)
 {
     (void)pvParameters;
 
-    const TickType_t polling_period = pdMS_TO_TICKS(100);
-    const TickType_t timeout_ticks  = pdMS_TO_TICKS(FAILSAFE_TIMEOUT_MS);
+    configASSERT(s_tx_queue != NULL);
+    static uint8_t s_payload[TELEMETRY_STATS_COUNT * sizeof(uint32_t)];
 
-    for (;;) {
-        const BaseType_t gpio_event = xSemaphoreTake(s_sem_failsafe, polling_period);
+    TickType_t last_wake = xTaskGetTickCount();
+    uint32_t   uptime_s  = 0U;
 
-        if (gpio_event == pdTRUE) {
-            trigger_failsafe("FAILSAFE: GPIO error signal detected");
-        } else {
-            const TickType_t now       = xTaskGetTickCount();
-            const TickType_t last_tick = ecu_state_get_last_rx_tick();
-            if ((now - last_tick) >= timeout_ticks) {
-                const ecu_mode_t current_mode = ecu_state_get_mode();
-                if (current_mode != ECU_MODE_OFF) {
-                    trigger_failsafe("FAILSAFE: UART silence > 2s");
-                }
-            }
-        }
+    for (;;)
+    {
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(TELEMETRY_PERIOD_MS));
+        uptime_s++;
+
+        uint32_t rx_valid     = task_rx_get_count_valid();
+        uint32_t rx_crc_error = task_rx_get_count_crc_err();
+        uint32_t rx_dropped   = task_rx_get_count_dropped();
+        uint32_t tx_output    = task_tx_get_count_output();
+
+        uint8_t *p = s_payload;
+        memcpy(p, &rx_valid,     sizeof(uint32_t)); p += sizeof(uint32_t);
+        memcpy(p, &rx_crc_error, sizeof(uint32_t)); p += sizeof(uint32_t);
+        memcpy(p, &rx_dropped,   sizeof(uint32_t)); p += sizeof(uint32_t);
+        memcpy(p, &tx_output,    sizeof(uint32_t)); p += sizeof(uint32_t);
+        memcpy(p, &uptime_s,     sizeof(uint32_t));
+
+        const uint16_t payload_len =
+            (uint16_t)(TELEMETRY_STATS_COUNT * sizeof(uint32_t));
+
+        /* task_tx est le SEUL encodeur : on lui transmet le payload BRUT. */
+        tx_message_t msg;
+        msg.type        = MSG_STATS;
+        memcpy(msg.payload, s_payload, payload_len);
+        msg.payload_len = payload_len;
+
+        xQueueSend(s_tx_queue, &msg, 0);
     }
 }

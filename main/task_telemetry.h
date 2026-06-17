@@ -13,6 +13,5 @@
 
 void task_telemetry_init(QueueHandle_t tx_queue);
 void task_telemetry(void *pvParameters);
-void task_telemetry_inc_tx_output(void);
 
 #endif //ECU_TASK_TELEMETRY_H

@@ -20,7 +20,8 @@ typedef struct {
     uint16_t payload_len;
 } tx_message_t;
 
-void task_tx_init(QueueHandle_t tx_queue);
-void task_tx(void *pvParameters);
+void     task_tx_init(QueueHandle_t tx_queue);
+void     task_tx(void *pvParameters);
+uint32_t task_tx_get_count_output(void);
 
 #endif //ECU_TASK_TX_H

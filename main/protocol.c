@@ -24,25 +24,25 @@ size_t protocol_encode(uint8_t *dst, const uint8_t type,
     dst[idx++] = type;
 
     if (payload && payload_len > 0) {
-        memcpy(&dst[idx],payload,payload_len);
+        memcpy(&dst[idx], payload, payload_len);
         idx += payload_len;
     }
 
-    const uint8_t crc = protocol_compute_crc(&dst[1], idx -1);
+    const uint8_t crc = protocol_compute_crc(&dst[1], idx - 1);
     dst[idx++] = crc;
     return idx;
 }
 
 bool protocol_decode(const uint8_t *frame, const size_t frame_len,
     ecu_frame_t *out) {
-    if (!frame || !frame_len) return false;
+    if (!frame || !out || !frame_len) return false;
     if (frame_len < 5) return false;
     if (frame[0] != PROTOCOL_START_BYTE) return false;
     const uint16_t len_field = (uint16_t)frame[1] | ((uint16_t)frame[2] << 8);
 
     if (len_field > frame_len) return false;
 
-    const size_t expected_frame_len = 1 + 2 +len_field + 1;
+    const size_t expected_frame_len = 1 + 2 + len_field + 1;
     if (frame_len != expected_frame_len) return false;
 
     const uint16_t payload_len = len_field - 1;

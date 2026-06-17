@@ -12,23 +12,23 @@ static const char *TAG = "ecu_state";
 static ecu_state_t s_state;
 static SemaphoreHandle_t s_mutex = NULL;
 
-#define LOCK()                                                          \
-do {                                                                \
-if (s_mutex == NULL ||                                          \
-xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) {        \
-ESP_LOGE(TAG, "mutex take failed");                         \
-return;                                                     \
-}                                                               \
-} while (0)
+#define LOCK()                                                  \
+    do {                                                        \
+        if (s_mutex == NULL ||                                  \
+            xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) { \
+            ESP_LOGE(TAG, "mutex take failed");                 \
+            return;                                             \
+        }                                                       \
+    } while (0)
 
-#define LOCK_RET(ret_val)                                               \
-do {                                                                \
-if (s_mutex == NULL ||                                          \
-xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) {        \
-ESP_LOGE(TAG, "mutex take failed");                         \
-return (ret_val);                                           \
-}                                                               \
-} while (0)
+#define LOCK_RET(ret_val)                                       \
+    do {                                                        \
+        if (s_mutex == NULL ||                                  \
+            xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) { \
+            ESP_LOGE(TAG, "mutex take failed");                 \
+            return (ret_val);                                   \
+        }                                                       \
+    } while (0)
 
 #define UNLOCK() xSemaphoreGive(s_mutex)
 
@@ -36,7 +36,7 @@ void ecu_state_init(void) {
     s_mutex = xSemaphoreCreateMutex();
     if (s_mutex == NULL) {
         ESP_LOGE(TAG, "xSemaphoreCreateMutex failed - halting");
-        for (;;) { vTaskDelay(portMax_DELAY);}
+        for (;;) { vTaskDelay(portMAX_DELAY); }
     }
     s_state.mode         = ECU_MODE_OFF;
     s_state.setpoint     = 0.0f;
