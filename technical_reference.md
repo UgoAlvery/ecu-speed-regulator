@@ -229,6 +229,23 @@ void task_failsafe(void *pvParameters);
 
 ---
 
+## Tests hébergés (host) — ✅ implémenté
+
+`protocol.c` et `pid.c` sont testés nativement (GCC, sans ESP-IDF/FreeRTOS), profitant de
+leur statut de libs pures.
+
+```
+test/unit/test_runner.h    → harness minimal, sans dépendance externe
+test/unit/test_protocol.c  → 60 tests (CRC, encode, decode, roundtrip, détection d'erreur)
+test/unit/test_pid.c       → 35 tests (init, reset, P/I/D, saturation, anti-windup)
+test/unit/Makefile         → build natif, -fsanitize=address,undefined
+```
+
+`make -C test/unit run` : build + exécution des deux suites. 95 tests, 0 échec, aucun
+warning, aucun trigger ASan/UBSan.
+
+---
+
 ## Ordre d'implémentation conseillé
 
 1. ✅ `protocol.h / .c` — lib pure, testable sans FreeRTOS
