@@ -246,6 +246,32 @@ warning, aucun trigger ASan/UBSan.
 
 ---
 
+## Fuzzing — protocol_decode — ✅ implémenté
+
+`protocol_decode` est la seule fonction du firmware qui consomme un flux non fiable
+(UART) — candidate naturelle au fuzzing. Harness libFuzzer (clang, compilation host,
+`protocol.c` étant une lib pure) :
+
+```
+test/fuzz/fuzz_protocol_decode.c → harness LLVMFuzzerTestOneInput(data, size)
+test/fuzz/gen_seeds.c            → génère un corpus de départ via protocol_encode
+                                    (trame vide par type connu, payload petit/max,
+                                    CRC corrompu, LEN gonflé, START invalide)
+test/fuzz/Makefile               → make fuzz [SECONDS=60] ; make repro CRASH=<file>
+```
+
+Build : `-fsanitize=fuzzer,address,undefined`. `corpus/` et `findings/` sont générés,
+non versionnés (`.gitignore` dédié).
+
+**Résultat** (session de validation, 60 s) : ~29,3 millions d'exécutions, 0 crash, 0
+timeout, 0 trigger ASan/UBSan, `findings/` vide. Couverture stabilisée à 31 arêtes / 67
+features — cohérent avec une fonction de validation à chemin court, sans boucle
+dépendante de l'entrée non bornée. Confirme la garantie du protocole : toute trame
+malformée (CRC invalide, LEN incohérent, START invalide, troncature) est rejetée
+silencieusement (`false`), sans plantage ni lecture hors bornes.
+
+---
+
 ## Ordre d'implémentation conseillé
 
 1. ✅ `protocol.h / .c` — lib pure, testable sans FreeRTOS

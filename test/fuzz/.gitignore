@@ -1,0 +1,5 @@
+fuzz_protocol_decode
+gen_seeds
+corpus/
+findings/
+*.o
