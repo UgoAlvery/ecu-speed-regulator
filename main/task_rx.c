@@ -92,15 +92,18 @@ static bool parser_feed_byte(frame_parser_t *p, const uint8_t byte, ecu_frame_t 
 
         case STATE_READ_CRC:
             p->buf[p->buf_idx++] = byte;
-
-            if (protocol_decode(p->buf, p->buf_idx, out)) {
-                parser_reset(p);
-                return true;
-            } else {
-                s_count_crc_err++;
-                parser_reset(p);
-                return false;
+            /* CRC16 = 2 octets little-endian ; attendre le second avant de valider */
+            if (p->buf_idx == 1u + 2u + p->len_field + 2u) {
+                if (protocol_decode(p->buf, p->buf_idx, out)) {
+                    parser_reset(p);
+                    return true;
+                } else {
+                    s_count_crc_err++;
+                    parser_reset(p);
+                    return false;
+                }
             }
+            break;
 
         default:
             parser_reset(p);
