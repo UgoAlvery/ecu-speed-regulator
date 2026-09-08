@@ -1,5 +1,7 @@
 # ECU — Régulateur de Vitesse Temps Réel
 
+[![CI](https://github.com/UgoAlvery/ecu-speed-regulator/actions/workflows/ci.yml/badge.svg)](https://github.com/UgoAlvery/ecu-speed-regulator/actions/workflows/ci.yml)
+
 > TP EPITA 2026 · Systèmes Embarqués / Temps Réel
 > Plateforme : **ESP32** · RTOS : **FreeRTOS** · Toolchain : **ESP-IDF v5.3**
 

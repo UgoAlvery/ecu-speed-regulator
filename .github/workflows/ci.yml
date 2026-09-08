@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  firmware-build:
+    name: Build firmware (ESP-IDF v5.3, target esp32)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: esp-idf build
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3.5
+          target: esp32
+          path: '.'
+
+  hosted-tests:
+    name: Tests hébergés (protocol.c, pid.c)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Build & run test suites (ASan/UBSan)
+        run: make -C test/unit run
+
+  fuzz-smoke:
+    name: Fuzzing smoke-test (protocol_decode)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # Régression rapide, pas une campagne de fuzzing complète : détecte tout
+      # crash/UB déjà connu ré-introduit par la PR, sans allonger le CI.
+      - name: Build fuzz harness + corpus de départ
+        run: |
+          make -C test/fuzz fuzz_protocol_decode
+          make -C test/fuzz seeds
+
+      - name: Fuzz 30s (libFuzzer, ASan/UBSan)
+        run: |
+          cd test/fuzz
+          mkdir -p findings
+          ./fuzz_protocol_decode -max_total_time=30 -artifact_prefix=findings/ corpus/
+
+      - name: Upload crash artifacts (si échec)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings
+          path: test/fuzz/findings/

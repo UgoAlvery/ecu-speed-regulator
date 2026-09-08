@@ -272,6 +272,23 @@ silencieusement (`false`), sans plantage ni lecture hors bornes.
 
 ---
 
+## CI — GitHub Actions — ✅ implémenté
+
+`.github/workflows/ci.yml`, déclenché sur push/PR vers `main`, 3 jobs indépendants :
+
+| Job              | Runner       | Contenu                                                        |
+|------------------|--------------|-----------------------------------------------------------------|
+| `firmware-build` | ubuntu-latest| `espressif/esp-idf-ci-action@v1` (image Docker ESP-IDF v5.3.5), `idf.py build` cible esp32 |
+| `hosted-tests`   | ubuntu-latest| `make -C test/unit run` — 95 tests, ASan/UBSan                 |
+| `fuzz-smoke`     | ubuntu-latest| build + corpus de départ + 30 s de fuzzing libFuzzer sur `protocol_decode`, artefacts uploadés si crash |
+
+`fuzz-smoke` n'est pas une campagne de fuzzing complète (voir section Fuzzing ci-dessus
+pour la session de validation longue) : c'est une régression rapide qui détecte tout
+crash/UB déjà connu ré-introduit par un changement, sans allonger significativement le
+temps de CI.
+
+---
+
 ## Ordre d'implémentation conseillé
 
 1. ✅ `protocol.h / .c` — lib pure, testable sans FreeRTOS
