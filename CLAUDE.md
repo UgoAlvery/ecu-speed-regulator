@@ -116,7 +116,7 @@ détail) :
 3. ✅ Tests unitaires hébergés (harness maison, sans dépendance externe) sur `protocol.c`
    et `pid.c`
 4. ✅ Fuzzing de `protocol_decode` (libFuzzer/clang, compilation host)
-5. CI GitHub Actions (build firmware + tests hébergés)
+5. ✅ CI GitHub Actions (build firmware + tests hébergés + smoke-test fuzzing)
 6. Authentification légère (nonce/anti-rejeu) sur `protocol.c`
 7. RTA formelle (modèle sporadique, blocking term du mutex chiffré) + FMEA/AMDEC
 8. Watchdog Task Watchdog Timer (TWDT) — implémentation possible, validation attend le
