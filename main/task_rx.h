@@ -18,5 +18,6 @@ void task_rx(void *pvParameters);
 uint32_t task_rx_get_count_valid(void);
 uint32_t task_rx_get_count_crc_err(void);
 uint32_t task_rx_get_count_dropped(void);
+uint32_t task_rx_get_count_replay(void);
 
 #endif /* ECU_TASK_RX_H */

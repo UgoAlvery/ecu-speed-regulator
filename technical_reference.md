@@ -68,7 +68,8 @@ dédiée serait du overhead sans bénéfice.
 ```c
 #define PROTOCOL_START_BYTE        0xAA
 #define PROTOCOL_MAX_PAYLOAD_SIZE  128
-#define PROTOCOL_MAX_FRAME_SIZE    (1 + 2 + 1 + PROTOCOL_MAX_PAYLOAD_SIZE + 2)
+#define PROTOCOL_NONCE_SIZE        2
+#define PROTOCOL_MAX_FRAME_SIZE    (1 + 2 + 1 + PROTOCOL_NONCE_SIZE + PROTOCOL_MAX_PAYLOAD_SIZE + 2)
 
 #define MSG_SETPOINT  0x01
 #define MSG_SPEED     0x02
@@ -80,15 +81,22 @@ dédiée serait du overhead sans bénéfice.
 
 typedef struct {
     uint8_t  type;
+    uint16_t nonce;
     uint8_t  payload[PROTOCOL_MAX_PAYLOAD_SIZE];
     uint16_t payload_len;
 } ecu_frame_t;
 
+typedef struct {
+    uint16_t last_nonce;
+} protocol_nonce_ctx_t;
+
 uint16_t protocol_compute_crc(const uint8_t *data, size_t len);
-size_t  protocol_encode(uint8_t *dst, uint8_t type,
+size_t  protocol_encode(uint8_t *dst, uint8_t type, uint16_t nonce,
                         const uint8_t *payload, uint16_t payload_len);
 bool    protocol_decode(const uint8_t *frame, size_t frame_len,
                         ecu_frame_t *out);
+void    protocol_nonce_ctx_init(protocol_nonce_ctx_t *ctx);
+bool    protocol_nonce_check_and_update(protocol_nonce_ctx_t *ctx, uint16_t nonce);
 ```
 
 **Règles** :
@@ -96,7 +104,8 @@ bool    protocol_decode(const uint8_t *frame, size_t frame_len,
 - `protocol_decode` travaille sur une trame déjà complète en mémoire
 - CRC = CRC-16/CCITT (polynôme 0x1021, init 0x0000, variante XMODEM), calculé
   sur tous les octets sauf START ; transmis en little-endian sur 2 octets
-- LEN = taille(TYPE + PAYLOAD), little-endian sur 2 octets
+- LEN = taille(TYPE + NONCE + PAYLOAD), little-endian sur 2 octets
+- NONCE = compteur 16 bits anti-rejeu, cf. section « Authentification légère » ci-dessous
 - Retour 0 / false en cas d'erreur, jamais d'assert en prod
 
 ---
@@ -119,6 +128,7 @@ void task_rx(void *pvParameters);
 uint32_t task_rx_get_count_valid(void);
 uint32_t task_rx_get_count_crc_err(void);
 uint32_t task_rx_get_count_dropped(void);
+uint32_t task_rx_get_count_replay(void);
 ```
 
 **Règles** :
@@ -128,6 +138,10 @@ uint32_t task_rx_get_count_dropped(void);
 - Compteurs `volatile`, pas de mutex — un seul écrivain (task_rx), lecture
   périodique par task_telemetry (cohérence approximative acceptable)
 - `task_rx` ne crée pas la queue — elle lui est passée par `task_rx_init`
+- Contexte `protocol_nonce_ctx_t` détenu localement (statique) dans `task_rx.c`, comme
+  `frame_parser_t` — initialisé dans `task_rx_init`. Vérification du nonce **après**
+  `protocol_decode()` (CRC/format déjà validés), **avant** l'envoi dans `queue_frames` :
+  trame rejetée → `s_count_replay++`, pas d'enqueue, pas de blocage des trames suivantes
 
 **Machine à états parser** :
 ```
@@ -229,6 +243,52 @@ void task_failsafe(void *pvParameters);
 
 ---
 
+## Authentification légère — nonce anti-rejeu — ✅ implémenté
+
+Choix : nonce/compteur anti-rejeu plutôt que HMAC tronqué (les deux options étaient
+ouvertes par la roadmap). Justification : coût quasi nul (2 octets/trame, pas de calcul
+crypto), suffisant contre la menace réaliste sur ce bus (rejeu d'une trame de commande
+capturée), et cohérent avec le principe « authentification **légère** » — un HMAC
+apporterait l'intégrité de contenu (déjà couverte par le CRC16 contre les erreurs, pas
+contre la falsification volontaire) mais serait disproportionné pour un TP durci en
+projet perso plutôt qu'un produit réellement exposé à un adversaire actif.
+
+**API (`protocol.c`, lib pure — cf. interface ci-dessus)** :
+- `protocol_nonce_ctx_init(ctx)` : remet `last_nonce = 0`
+- `protocol_nonce_check_and_update(ctx, nonce)` : accepte ssi `nonce` est postérieur à
+  `ctx->last_nonce` au sens de l'arithmétique modulaire 16 bits signée
+  (`(int16_t)(nonce - last_nonce) > 0`) — tolère le wraparound normal (65536 trames à
+  10 Hz ≈ 109 min) comme les numéros de séquence TCP. Met à jour `ctx` uniquement en cas
+  d'acceptation ; ne modifie rien et retourne `false` sinon (rejeu, duplication, retard
+  hors ordre)
+- Un contexte par flux à protéger, passé par pointeur (même pattern que `pid_t`) — pas
+  d'état global dans `protocol.c`
+
+**Intégration firmware** :
+- Émission (`task_tx.c`) : compteur statique `s_tx_nonce` (task_tx est le seul écrivain
+  UART — même exception structurelle que les compteurs `volatile` de `task_rx`), pré-
+  incrémenté avant chaque `protocol_encode()` → séquence 1, 2, 3, ... partagée par tous
+  les types de message sortants (OUTPUT, STATS, ALARM, DBG)
+- Réception (`task_rx.c`) : `protocol_nonce_ctx_t` statique, initialisé dans
+  `task_rx_init`. Vérifié après `protocol_decode()` réussi, avant l'enqueue dans
+  `queue_frames` — trame rejetée → `s_count_replay++`, comportement silencieux identique
+  aux autres rejets protocolaires
+- Télémétrie : `rx_replay` ajouté à STATS (`TELEMETRY_STATS_COUNT` 5→6) — ordre du
+  payload : `rx_valid, rx_crc_error, rx_dropped, rx_replay, tx_output, uptime_s`
+  (4×uint32 → 5×uint32, cf. `task_telemetry.c`)
+
+**Limitation documentée** : pas d'état persistant entre redémarrages — après un reboot de
+l'ECU, `last_nonce` repart à 0, ce qui rouvre une fenêtre de rejeu jusqu'à la première
+trame légitime reçue (qui la referme aussitôt, puisque son nonce devient le nouveau
+plancher). Acceptable pour une authentification *légère* sur un bus UART point-à-point ;
+documenté explicitement plutôt que passé sous silence.
+
+`test/ecu_tester.py` : nonce sortant auto-incrémenté par `build_frame`/`send_frame`,
+vérification symétrique des nonces entrants (`is_nonce_newer`, même règle modulaire),
+et action de stress dédiée (rejeu de la dernière trame SPEED acceptée, cf. `run_stress_test`).
+
+---
+
 ## Tests hébergés (host) — ✅ implémenté
 
 `protocol.c` et `pid.c` sont testés nativement (GCC, sans ESP-IDF/FreeRTOS), profitant de
@@ -236,12 +296,13 @@ leur statut de libs pures.
 
 ```
 test/unit/test_runner.h    → harness minimal, sans dépendance externe
-test/unit/test_protocol.c  → 60 tests (CRC, encode, decode, roundtrip, détection d'erreur)
+test/unit/test_protocol.c  → 90 tests (CRC, encode, decode, roundtrip, détection d'erreur,
+                              nonce anti-rejeu)
 test/unit/test_pid.c       → 35 tests (init, reset, P/I/D, saturation, anti-windup)
 test/unit/Makefile         → build natif, -fsanitize=address,undefined
 ```
 
-`make -C test/unit run` : build + exécution des deux suites. 95 tests, 0 échec, aucun
+`make -C test/unit run` : build + exécution des deux suites. 125 tests, 0 échec, aucun
 warning, aucun trigger ASan/UBSan.
 
 ---
@@ -263,12 +324,19 @@ test/fuzz/Makefile               → make fuzz [SECONDS=60] ; make repro CRASH=<
 Build : `-fsanitize=fuzzer,address,undefined`. `corpus/` et `findings/` sont générés,
 non versionnés (`.gitignore` dédié).
 
-**Résultat** (session de validation, 60 s) : ~29,3 millions d'exécutions, 0 crash, 0
-timeout, 0 trigger ASan/UBSan, `findings/` vide. Couverture stabilisée à 31 arêtes / 67
-features — cohérent avec une fonction de validation à chemin court, sans boucle
-dépendante de l'entrée non bornée. Confirme la garantie du protocole : toute trame
-malformée (CRC invalide, LEN incohérent, START invalide, troncature) est rejetée
-silencieusement (`false`), sans plantage ni lecture hors bornes.
+**Résultat** (session de validation, 60 s, format initial sans NONCE) : ~29,3 millions
+d'exécutions, 0 crash, 0 timeout, 0 trigger ASan/UBSan, `findings/` vide. Couverture
+stabilisée à 31 arêtes / 67 features.
+
+**Re-validation** (30 s, après ajout du champ NONCE — cf. section Authentification
+légère) : ~23,7 millions d'exécutions, 0 crash, 0 timeout, 0 trigger ASan/UBSan,
+`findings/` vide, couverture stabilisée à 36 arêtes / 69 features (légère hausse
+cohérente avec le chemin de décodage un peu plus long). Confirme la garantie du
+protocole : toute trame malformée (CRC invalide, LEN incohérent, START invalide,
+troncature) est rejetée silencieusement (`false`), sans plantage ni lecture hors bornes.
+`protocol_decode` ne vérifie pas le nonce (ce n'est pas son rôle — cf. séparation
+décrite dans la section Authentification légère), le fuzzing de cette fonction ne
+couvre donc pas `protocol_nonce_check_and_update`, testée unitairement à la place.
 
 ---
 

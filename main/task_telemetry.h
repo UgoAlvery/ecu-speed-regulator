@@ -8,7 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
-#define TELEMETRY_STATS_COUNT   5U
+#define TELEMETRY_STATS_COUNT   6U
 #define TELEMETRY_PERIOD_MS     1000U
 
 void task_telemetry_init(QueueHandle_t tx_queue);

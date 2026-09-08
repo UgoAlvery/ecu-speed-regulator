@@ -79,17 +79,20 @@ Le bus CAN est simulé par une liaison **UART à 115 200 bauds**.
 ### Format de trame
 
 ```
-┌────────┬──────────┬────────┬──────────────────┬───────┐
-│ START  │   LEN    │  TYPE  │     PAYLOAD       │  CRC  │
-│ 0xAA   │ 2 octets │ 1 oct. │    N octets       │ 1 oct.│
-└────────┴──────────┴────────┴──────────────────┴───────┘
+┌────────┬──────────┬────────┬──────────┬──────────────────┬──────────┐
+│ START  │   LEN    │  TYPE  │  NONCE   │     PAYLOAD       │  CRC16   │
+│ 0xAA   │ 2 octets │ 1 oct. │ 2 octets │    N octets       │ 2 octets │
+└────────┴──────────┴────────┴──────────┴──────────────────┴──────────┘
 ```
 
 - **START** : `0xAA` — marqueur de début de trame
-- **LEN** : `uint16_t` little-endian — taille de `(TYPE + PAYLOAD)`
+- **LEN** : `uint16_t` little-endian — taille de `(TYPE + NONCE + PAYLOAD)`
 - **TYPE** : identifiant du message
+- **NONCE** : `uint16_t` little-endian — compteur strictement croissant côté émetteur,
+  anti-rejeu (voir [Authentification légère](#authentification-légère))
 - **PAYLOAD** : données utiles (taille variable)
-- **CRC** : XOR de tous les octets **sauf** le START
+- **CRC16** : CRC-16/CCITT (poly `0x1021`, init `0x0000`) sur tous les octets **sauf**
+  le START, transmis little-endian
 
 > Endianness : Little-Endian pour `float` (IEEE 754), `uint16_t`, `uint32_t`.
 
@@ -105,9 +108,24 @@ Le bus CAN est simulé par une liaison **UART à 115 200 bauds**.
 | `0x85` | `ALARM`    | `string`         | TX        | Alerte critique (failsafe)         |
 | `0xFF` | `DBG`      | `string`         | TX        | Message de debug                   |
 
+### Authentification légère
+
+Chaque trame porte un **nonce** 16 bits, incrémenté par l'émetteur à chaque envoi. Le
+récepteur (`task_rx`) n'accepte que les nonces strictement postérieurs au dernier accepté
+— comparaison modulaire tolérante au wraparound, comme les numéros de séquence TCP. Toute
+trame avec un nonce égal ou antérieur (rejeu, duplication, retard hors ordre) est rejetée
+silencieusement, sans affecter le traitement des trames suivantes.
+
+C'est une authentification *faible* — pas de MAC, un attaquant capable de forger le CRC
+peut forger un nonce valide — mais elle ferme gratuitement la classe d'attaques la plus
+simple contre un ECU : le rejeu d'une trame de commande légitime capturée sur le bus.
+
 ### Gestion des erreurs de protocole
 
-Toute trame présentant un CRC invalide, une longueur incohérente ou un ID inconnu est **rejetée silencieusement** — sans blocage ni perte d'état. Les compteurs `rx_crc_error` et `rx_dropped` sont incrémentés selon le cas et remontés via STATS.
+Toute trame présentant un CRC invalide, une longueur incohérente, un ID inconnu ou un nonce
+rejeté est **rejetée silencieusement** — sans blocage ni perte d'état. Les compteurs
+`rx_crc_error`, `rx_dropped` et `rx_replay` sont incrémentés selon le cas et remontés via
+STATS.
 
 ---
 
@@ -233,7 +251,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 | Phase                 | Durée | Description                                                        |
 |-----------------------|-------|--------------------------------------------------------------------|
 | Fonctionnement normal | 30 s  | Envoi SETPOINT + SPEED, vérification OUTPUT toutes les 100 ms      |
-| Stress test           | —     | Flood de messages, trames fragmentées, CRC invalides, IDs inconnus |
+| Stress test           | —     | Flood de messages, trames fragmentées, CRC invalides, rejeu de trame |
 | Reprise post-stress   | 5 s   | Vérification que la régulation repart correctement                 |
 | Test failsafe         | 2.5 s | Silence radio → vérification OUTPUT = 0 et ALARM reçu              |
 

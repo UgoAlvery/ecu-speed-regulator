@@ -94,13 +94,16 @@ Règles structurelles à préserver :
 ## Protocole (format figé, cf. `technical_reference.md` pour l'interface C)
 
 ```
-[START: 0xAA] [LEN: 2 octets] [TYPE: 1 octet] [PAYLOAD: N octets] [CRC16: 2 octets LE]
+[START: 0xAA] [LEN: 2 octets] [TYPE: 1 octet] [NONCE: 2 octets LE] [PAYLOAD: N octets] [CRC16: 2 octets LE]
 ```
-- LEN = taille(TYPE + PAYLOAD), little-endian
+- LEN = taille(TYPE + NONCE + PAYLOAD), little-endian
+- NONCE = compteur 16 bits, strictement croissant côté émetteur (anti-rejeu) — voir
+  `protocol_nonce_check_and_update()` dans `technical_reference.md`
 - CRC16 = CRC-16/CCITT (polynôme 0x1021, init 0x0000) sur tous les octets sauf START,
   transmis little-endian sur 2 octets. Détecte rafales ≤16 bits et toute double erreur.
-- Toute trame CRC invalide / longueur incohérente / ID inconnu → rejet silencieux, sans
-  bloquer le traitement des trames suivantes ; incrémenter le compteur d'erreur concerné.
+- Toute trame CRC invalide / longueur incohérente / ID inconnu / nonce rejeté → rejet
+  silencieux, sans bloquer le traitement des trames suivantes ; incrémenter le compteur
+  d'erreur concerné.
 
 ## État d'avancement
 
@@ -117,7 +120,7 @@ détail) :
    et `pid.c`
 4. ✅ Fuzzing de `protocol_decode` (libFuzzer/clang, compilation host)
 5. ✅ CI GitHub Actions (build firmware + tests hébergés + smoke-test fuzzing)
-6. Authentification légère (nonce/anti-rejeu) sur `protocol.c`
+6. ✅ Authentification légère (nonce/anti-rejeu) sur `protocol.c`
 7. RTA formelle (modèle sporadique, blocking term du mutex chiffré) + FMEA/AMDEC
 8. Watchdog Task Watchdog Timer (TWDT) — implémentation possible, validation attend le
    hardware

@@ -34,6 +34,10 @@ class ECUTester:
         self.running = True
         self.stats_count = 0
         self.start_time = time.time()
+        self.tx_nonce = 0          # anti-rejeu sortant, incrémenté à chaque trame émise
+        self.last_rx_nonce = None  # anti-rejeu entrant, pour vérifier les trames de l'ECU
+        self.replay_dropped = 0    # trames locales rejetées côté script (nonce ECU non croissant)
+        self.last_speed_frame = None  # dernière trame SPEED envoyée, pour le test de rejeu
 
     def log(self, message):
         timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
@@ -56,14 +60,23 @@ class ECUTester:
             crc &= 0xFFFF
         return crc
 
-    def send_frame(self, msg_type, payload=b''):
-        """Construit et envoie une trame: [0xAA][LEN(2)][TYPE][PAYLOAD][CRC16(2 LE)]"""
-        length = len(payload) + 1  # LEN: Taille de (TYPE + PAYLOAD)
-        header = struct.pack('<HB', length, msg_type)
+    def build_frame(self, msg_type, payload=b'', nonce=None):
+        """Construit une trame: [0xAA][LEN(2)][TYPE][NONCE(2 LE)][PAYLOAD][CRC16(2 LE)]
+        sans l'envoyer — utile pour rejouer volontairement un nonce donné (test anti-rejeu)."""
+        if nonce is None:
+            self.tx_nonce = (self.tx_nonce + 1) & 0xFFFF
+            nonce = self.tx_nonce
+        length = len(payload) + 1 + 2  # LEN: Taille de (TYPE + NONCE + PAYLOAD)
+        header = struct.pack('<HBH', length, msg_type, nonce)
         full_msg = header + payload
         crc = self.compute_crc(full_msg)
-        frame = struct.pack('B', 0xAA) + full_msg + struct.pack('<H', crc)
+        return struct.pack('B', 0xAA) + full_msg + struct.pack('<H', crc)
+
+    def send_frame(self, msg_type, payload=b'', nonce=None):
+        """Construit et envoie une trame (cf. build_frame)."""
+        frame = self.build_frame(msg_type, payload, nonce)
         self.ser.write(frame)
+        return frame
 
     def handle_non_protocol_byte(self, first_byte):
         """Traite les octets hors protocole binaire (logs ESP texte, bruit)."""
@@ -84,6 +97,17 @@ class ECUTester:
 
         self.log(f"Byte inattendu: {first_byte} - resync en cours...")
 
+    def is_nonce_newer(self, nonce):
+        """Même règle de comparaison modulaire que protocol_nonce_check_and_update()
+        côté firmware : accepte ssi nonce est postérieur au dernier accepté, au
+        sens circulaire (tolère le wraparound 16 bits)."""
+        if self.last_rx_nonce is None:
+            return True
+        delta = (nonce - self.last_rx_nonce) & 0xFFFF
+        if delta >= 0x8000:
+            delta -= 0x10000
+        return delta > 0
+
     def receive_feedback(self):
         """Lit et décode les messages venant de l'ECU (Output et Télémétrie)"""
         while self.running:
@@ -101,7 +125,15 @@ class ECUTester:
                         # Vérification CRC-16 little-endian
                         if self.compute_crc(len_bytes + data) == struct.unpack('<H', crc_received)[0]:
                             msg_type = data[0]
-                            payload = data[1:]
+                            nonce = struct.unpack('<H', data[1:3])[0]
+                            payload = data[3:]
+
+                            if not self.is_nonce_newer(nonce):
+                                self.replay_dropped += 1
+                                self.log(f"[ANTI-REJEU] trame ECU ignorée "
+                                         f"(nonce={nonce} <= dernier={self.last_rx_nonce})")
+                                continue
+                            self.last_rx_nonce = nonce
 
                             if msg_type == MSG_OUTPUT:
                                 self.last_output = struct.unpack('<f', payload)[0]
@@ -109,7 +141,15 @@ class ECUTester:
 
                             elif msg_type == MSG_STATS:
                                 self.stats_count += 1
-                                self.log(f"[TELEMETRIE] Reçue ({self.stats_count}s)")
+                                if len(payload) >= 24:
+                                    rx_valid, rx_crc_err, rx_dropped, rx_replay, tx_output, uptime_s = \
+                                        struct.unpack('<6I', payload[:24])
+                                    self.log(f"[TELEMETRIE] ({self.stats_count}s) "
+                                             f"valid={rx_valid} crc_err={rx_crc_err} "
+                                             f"dropped={rx_dropped} replay={rx_replay} "
+                                             f"tx_output={tx_output} uptime={uptime_s}s")
+                                else:
+                                    self.log(f"[TELEMETRIE] Reçue ({self.stats_count}s)")
 
                             elif msg_type == MSG_ALARM:
                                 self.log(f"\n[ALERTE ECU] : {payload.decode(errors='ignore')}")
@@ -131,7 +171,8 @@ class ECUTester:
 
             self.update_vehicle_model(dt)
             # Envoi de la vitesse mesurée toutes les 100ms
-            self.send_frame(MSG_SPEED, struct.pack('<f', self.current_speed))
+            # (frame gardée pour le test de rejeu de la phase de stress)
+            self.last_speed_frame = self.send_frame(MSG_SPEED, struct.pack('<f', self.current_speed))
             time.sleep(SPEED_TX_PERIOD_S)
 
     def run_stress_test(self):
@@ -145,15 +186,27 @@ class ECUTester:
 
         # 2. Trames fragmentées
         self.log("Action: Envoi de trame fragmentée...")
-        partial_frame = struct.pack('B', 0xAA) + struct.pack('<HB', 5, MSG_SPEED)
+        # LEN=7 : TYPE(1) + NONCE(2) + PAYLOAD(4 B, float)
+        partial_frame = struct.pack('B', 0xAA) + struct.pack('<HB', 7, MSG_SPEED)
         self.ser.write(partial_frame)
-        time.sleep(0.5) # Pause au milieu du message
-        self.ser.write(struct.pack('<f', 100.0) + b'\x00') # Fin de trame
+        time.sleep(0.5)  # Pause au milieu du message → doit déclencher le timeout parser (50ms)
+        # Reste de la trame envoyé après coup ; CRC volontairement omis, l'objectif
+        # est de vérifier que le parser s'est déjà reset sur timeout, pas de
+        # produire une trame valide.
+        self.ser.write(struct.pack('<H', 0) + struct.pack('<f', 100.0))
 
         # 3. Erreur de CRC16
         self.log("Action: Envoi erreur CRC...")
-        # MSG_SPEED (LEN=5, float 0.0) avec CRC16 intentionnellement invalide
-        self.ser.write(b'\xAA\x05\x00\x02\x00\x00\x00\x00\xFF\xFF')
+        bad_crc_frame = bytearray(self.build_frame(MSG_SPEED, struct.pack('<f', 0.0)))
+        bad_crc_frame[-2:] = b'\xFF\xFF'  # CRC intentionnellement invalide
+        self.ser.write(bytes(bad_crc_frame))
+
+        # 4. Rejeu (replay) d'une trame déjà acceptée précédemment
+        self.log("Action: Rejeu d'une trame SPEED déjà envoyée (test anti-rejeu)...")
+        if self.last_speed_frame is not None:
+            self.ser.write(self.last_speed_frame)
+            self.log("  -> attendu : rejet silencieux côté ECU, compteur "
+                     "'replay' incrémenté dans la prochaine trame STATS")
 
     def test_failsafe(self):
         """Vérifie si l'ECU passe en Failsafe après 2s de silence"""
