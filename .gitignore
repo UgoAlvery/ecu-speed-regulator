@@ -13,3 +13,7 @@ dependencies.lock
 Thumbs.db
 cmake-build-debug/
 cmake-build-release/
+
+# Python
+__pycache__/
+*.pyc

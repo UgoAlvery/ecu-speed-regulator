@@ -24,10 +24,12 @@ typedef struct {
 
 static QueueHandle_t s_rx_queue;
 static frame_parser_t s_parser;
+static protocol_nonce_ctx_t s_nonce_ctx;
 
 static volatile uint32_t s_count_valid   = 0;
 static volatile uint32_t s_count_crc_err = 0;
 static volatile uint32_t s_count_dropped = 0;
+static volatile uint32_t s_count_replay  = 0;
 
 static void uart_init(void)
 {
@@ -72,8 +74,8 @@ static bool parser_feed_byte(frame_parser_t *p, const uint8_t byte, ecu_frame_t 
             if (p->len_bytes_read == 2) {
                 p->len_field = (uint16_t)p->buf[1] | ((uint16_t)p->buf[2] << 8);
 
-                if (p->len_field < 1 ||
-                    p->len_field > (PROTOCOL_MAX_PAYLOAD_SIZE + 1)) {
+                if (p->len_field < (1 + PROTOCOL_NONCE_SIZE) ||
+                    p->len_field > (PROTOCOL_MAX_PAYLOAD_SIZE + 1 + PROTOCOL_NONCE_SIZE)) {
                     parser_reset(p);
                     s_count_dropped++;
                     break;
@@ -119,12 +121,14 @@ void task_rx_init(const QueueHandle_t rx_queue)
 {
     s_rx_queue = rx_queue;
     parser_reset(&s_parser);
+    protocol_nonce_ctx_init(&s_nonce_ctx);
     uart_init();
 }
 
 uint32_t task_rx_get_count_valid(void)   { return s_count_valid;   }
 uint32_t task_rx_get_count_crc_err(void) { return s_count_crc_err; }
 uint32_t task_rx_get_count_dropped(void) { return s_count_dropped; }
+uint32_t task_rx_get_count_replay(void)  { return s_count_replay;  }
 
 void task_rx(void *pvParameters) {
     (void)pvParameters;
@@ -137,10 +141,14 @@ void task_rx(void *pvParameters) {
         if (received == 1) {
             const bool frame_ready = parser_feed_byte(&s_parser, byte, &frame);
             if (frame_ready) {
-                s_count_valid++;
-                ecu_state_set_last_rx_tick(xTaskGetTickCount());
-                if (xQueueSend(s_rx_queue, &frame, 0) != pdTRUE) {
-                    s_count_dropped++;
+                if (!protocol_nonce_check_and_update(&s_nonce_ctx, frame.nonce)) {
+                    s_count_replay++;
+                } else {
+                    s_count_valid++;
+                    ecu_state_set_last_rx_tick(xTaskGetTickCount());
+                    if (xQueueSend(s_rx_queue, &frame, 0) != pdTRUE) {
+                        s_count_dropped++;
+                    }
                 }
             }
         } else {

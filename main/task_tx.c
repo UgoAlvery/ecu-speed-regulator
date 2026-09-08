@@ -24,6 +24,12 @@ static QueueHandle_t s_tx_queue = NULL;
 
 static volatile uint32_t s_count_tx_output = 0;
 
+/* Nonce sortant : task_tx est le seul écrivain UART et le seul encodeur —
+ * pas de mutex nécessaire (même exception structurelle que les compteurs
+ * volatile de task_rx). Démarre à 1 : protocol_nonce_check_and_update()
+ * rejette un nonce égal à la valeur initiale du contexte récepteur (0). */
+static uint16_t s_tx_nonce = 0;
+
 
 void task_tx_init(const QueueHandle_t tx_queue)
 {
@@ -62,6 +68,7 @@ void task_tx(void *pvParameters)
 
         const size_t frame_len = protocol_encode(frame_buf,
                                            msg.type,
+                                           ++s_tx_nonce,
                                            msg.payload,
                                            msg.payload_len);
         if (frame_len == 0) {

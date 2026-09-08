@@ -44,12 +44,14 @@ void task_telemetry(void *pvParameters)
         uint32_t rx_valid     = task_rx_get_count_valid();
         uint32_t rx_crc_error = task_rx_get_count_crc_err();
         uint32_t rx_dropped   = task_rx_get_count_dropped();
+        uint32_t rx_replay    = task_rx_get_count_replay();
         uint32_t tx_output    = task_tx_get_count_output();
 
         uint8_t *p = s_payload;
         memcpy(p, &rx_valid,     sizeof(uint32_t)); p += sizeof(uint32_t);
         memcpy(p, &rx_crc_error, sizeof(uint32_t)); p += sizeof(uint32_t);
         memcpy(p, &rx_dropped,   sizeof(uint32_t)); p += sizeof(uint32_t);
+        memcpy(p, &rx_replay,    sizeof(uint32_t)); p += sizeof(uint32_t);
         memcpy(p, &tx_output,    sizeof(uint32_t)); p += sizeof(uint32_t);
         memcpy(p, &uptime_s,     sizeof(uint32_t));
 
