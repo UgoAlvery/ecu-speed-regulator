@@ -239,7 +239,7 @@ void task_failsafe(void *pvParameters);
 6. ✅ `task_control.h / .c` — boucle 100 ms + dispatch + PID
 7. ✅ `failsafe.h / .c` — ISR + timeout
 8. ✅ `task_telemetry.h / .c` — STATS 1 s
-9. ⬜ `main.c` — assemblage final
+9. ✅ `main.c` — assemblage final
 
 ---
 
