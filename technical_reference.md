@@ -68,7 +68,7 @@ dédiée serait du overhead sans bénéfice.
 ```c
 #define PROTOCOL_START_BYTE        0xAA
 #define PROTOCOL_MAX_PAYLOAD_SIZE  128
-#define PROTOCOL_MAX_FRAME_SIZE    (1 + 2 + 1 + PROTOCOL_MAX_PAYLOAD_SIZE + 1)
+#define PROTOCOL_MAX_FRAME_SIZE    (1 + 2 + 1 + PROTOCOL_MAX_PAYLOAD_SIZE + 2)
 
 #define MSG_SETPOINT  0x01
 #define MSG_SPEED     0x02
@@ -84,7 +84,7 @@ typedef struct {
     uint16_t payload_len;
 } ecu_frame_t;
 
-uint8_t protocol_compute_crc(const uint8_t *data, size_t len);
+uint16_t protocol_compute_crc(const uint8_t *data, size_t len);
 size_t  protocol_encode(uint8_t *dst, uint8_t type,
                         const uint8_t *payload, uint16_t payload_len);
 bool    protocol_decode(const uint8_t *frame, size_t frame_len,
@@ -94,7 +94,8 @@ bool    protocol_decode(const uint8_t *frame, size_t frame_len,
 **Règles** :
 - `protocol.h` n'inclut pas `<driver/uart.h>` — lib pure
 - `protocol_decode` travaille sur une trame déjà complète en mémoire
-- CRC = XOR de tous les octets sauf START (0xAA)
+- CRC = CRC-16/CCITT (polynôme 0x1021, init 0x0000, variante XMODEM), calculé
+  sur tous les octets sauf START ; transmis en little-endian sur 2 octets
 - LEN = taille(TYPE + PAYLOAD), little-endian sur 2 octets
 - Retour 0 / false en cas d'erreur, jamais d'assert en prod
 

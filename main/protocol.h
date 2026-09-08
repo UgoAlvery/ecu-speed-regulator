@@ -16,8 +16,8 @@
 
 #define PROTOCOL_START_BYTE        0xAA
 #define PROTOCOL_MAX_PAYLOAD_SIZE  128
-#define PROTOCOL_MAX_FRAME_SIZE    (1 + 2 + 1 + PROTOCOL_MAX_PAYLOAD_SIZE + 1)
-//                                  AA  LEN TYPE      PAYLOAD              CRC
+#define PROTOCOL_MAX_FRAME_SIZE    (1 + 2 + 1 + PROTOCOL_MAX_PAYLOAD_SIZE + 2)
+//                                  AA  LEN TYPE      PAYLOAD            CRC16
 
 typedef struct {
     uint8_t  type;
@@ -25,7 +25,7 @@ typedef struct {
     uint16_t payload_len;  // = LEN - 1
 } ecu_frame_t;
 
-uint8_t protocol_compute_crc(const uint8_t *data, size_t len);
+uint16_t protocol_compute_crc(const uint8_t *data, size_t len);
 
 size_t protocol_encode(uint8_t *dst, uint8_t type,
     const uint8_t *payload, uint16_t payload_len);
