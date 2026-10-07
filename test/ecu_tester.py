@@ -7,7 +7,11 @@ import threading
 from datetime import datetime
 
 # --- CONFIGURATION ---
-SERIAL_PORT = '/dev/ttyUSB0'  # À adapter
+# Port de l'adaptateur USB-TTL câblé sur l'UART2 protocole de l'ECU
+# (GPIO16 = RX ECU ← TX adaptateur, GPIO17 = TX ECU → RX adaptateur, GND commun).
+# Ce n'est PLUS le port USB natif de la carte : celui-ci ne porte que la console
+# ESP_LOG (idf.py monitor) et n'émet aucune trame protocole.
+SERIAL_PORT = '/dev/ttyUSB1'  # À adapter
 #SERIAL_PORT = '/tmp/ttyV0'
 BAUD_RATE = 115200
 TIMEOUT = 0.1
@@ -24,6 +28,15 @@ MSG_MODE_SET = 0x05
 MSG_OUTPUT   = 0x80
 MSG_STATS    = 0x83
 MSG_ALARM    = 0x85
+
+# Payload STATS (0x83) : uint32 LE, dans cet ordre — cf. technical_reference.md,
+# section « Télémétrie STATS ». Toute modification côté firmware se reporte ici.
+STATS_FIELDS = (
+    'rx_valid', 'rx_crc_error', 'rx_dropped', 'rx_replay',
+    'tx_output', 'tx_dropped', 'rx_invalid',
+    'uptime_s',
+)
+STATS_SIZE = 4 * len(STATS_FIELDS)
 
 class ECUTester:
     def __init__(self):
@@ -141,15 +154,12 @@ class ECUTester:
 
                             elif msg_type == MSG_STATS:
                                 self.stats_count += 1
-                                if len(payload) >= 28:
-                                    rx_valid, rx_crc_err, rx_dropped, rx_replay, \
-                                        tx_output, tx_dropped, uptime_s = \
-                                        struct.unpack('<7I', payload[:28])
+                                if len(payload) >= STATS_SIZE:
+                                    s = dict(zip(STATS_FIELDS,
+                                                 struct.unpack(f'<{len(STATS_FIELDS)}I',
+                                                               payload[:STATS_SIZE])))
                                     self.log(f"[TELEMETRIE] ({self.stats_count}s) "
-                                             f"valid={rx_valid} crc_err={rx_crc_err} "
-                                             f"dropped={rx_dropped} replay={rx_replay} "
-                                             f"tx_output={tx_output} tx_dropped={tx_dropped} "
-                                             f"uptime={uptime_s}s")
+                                             + " ".join(f"{k}={v}" for k, v in s.items()))
                                 else:
                                     self.log(f"[TELEMETRIE] Reçue ({self.stats_count}s)")
 

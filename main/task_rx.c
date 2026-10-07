@@ -42,10 +42,10 @@ static void uart_init(void)
         .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
     };
 
-    uart_driver_install(UART_NUM, UART_BUF_SIZE * 2, 0, 0, NULL, 0);
-    uart_param_config(UART_NUM, &cfg);
-    uart_set_pin(UART_NUM, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE,
-                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    ESP_ERROR_CHECK(uart_driver_install(UART_NUM, UART_BUF_SIZE * 2, 0, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(UART_NUM, &cfg));
+    ESP_ERROR_CHECK(uart_set_pin(UART_NUM, UART_PROTO_TX_PIN, UART_PROTO_RX_PIN,
+                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 }
 
 static void parser_reset(frame_parser_t *p)

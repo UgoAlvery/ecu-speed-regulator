@@ -1,4 +1,5 @@
 #include "protocol.h"
+#include <math.h>
 #include <string.h>
 
 
@@ -95,5 +96,26 @@ bool protocol_nonce_check_and_update(protocol_nonce_ctx_t *ctx, const uint16_t n
     if (delta <= 0) return false;
 
     ctx->last_nonce = nonce;
+    return true;
+}
+
+bool protocol_parse_f32(const ecu_frame_t *frame, float *out) {
+    if (!frame || !out) return false;
+    if (frame->payload_len != sizeof(float)) return false;
+
+    float val;
+    memcpy(&val, frame->payload, sizeof(float));
+    if (!isfinite(val)) return false;
+
+    *out = val;
+    return true;
+}
+
+bool protocol_parse_mode(const ecu_frame_t *frame, uint8_t *out) {
+    if (!frame || !out) return false;
+    if (frame->payload_len != 1u) return false;
+    if (frame->payload[0] > PROTOCOL_MODE_MAX) return false;
+
+    *out = frame->payload[0];
     return true;
 }

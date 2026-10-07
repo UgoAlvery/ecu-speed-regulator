@@ -4,7 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
-#define FAILSAFE_GPIO_PIN      GPIO_NUM_4
+#include "board_pins.h"
 
 #define FAILSAFE_TIMEOUT_MS    2000
 

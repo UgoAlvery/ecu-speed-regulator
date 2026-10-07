@@ -14,6 +14,7 @@
 ### Découpage en fichiers
 ```
 main.c              → app_main : init + xTaskCreate + rien d'autre
+board_pins.h        → brochage ESP32 #1, source unique des numéros de GPIO
 ecu_state.h / .c    → état partagé centralisé (accès sous mutex)
 protocol.h / .c     → lib pure sans état global (encode, decode, CRC)
 pid.h / .c          → lib pure sans état global (struct pid_t passée en paramètre)
@@ -118,6 +119,10 @@ bool    protocol_decode(const uint8_t *frame, size_t frame_len,
                         ecu_frame_t *out);
 void    protocol_nonce_ctx_init(protocol_nonce_ctx_t *ctx);
 bool    protocol_nonce_check_and_update(protocol_nonce_ctx_t *ctx, uint16_t nonce);
+
+#define PROTOCOL_MODE_MAX  2u
+bool    protocol_parse_f32(const ecu_frame_t *frame, float *out);    // len == 4, isfinite
+bool    protocol_parse_mode(const ecu_frame_t *frame, uint8_t *out); // len == 1, <= MODE_MAX
 ```
 
 **Règles** :
@@ -128,17 +133,19 @@ bool    protocol_nonce_check_and_update(protocol_nonce_ctx_t *ctx, uint16_t nonc
 - LEN = taille(TYPE + NONCE + PAYLOAD), little-endian sur 2 octets
 - NONCE = compteur 16 bits anti-rejeu, cf. section « Authentification légère » ci-dessous
 - Retour 0 / false en cas d'erreur, jamais d'assert en prod
+- Validation applicative des payloads (`protocol_parse_*`) dans la lib pure, pas dans
+  les tâches : longueur **exacte** du type (un payload trop long est aussi rejeté) et
+  domaine de valeur. `*out` n'est jamais modifié en cas de rejet. Testé en host
 
 ---
 
 ## Module task_rx.h / .c — interface figée
 
 ```c
-#define UART_NUM        UART_NUM_0
+#define UART_NUM        UART_NUM_2   // protocole ; UART0 = console seule
 #define UART_BUF_SIZE   1024
 #define UART_BAUD_RATE  115200
-#define TXD_PIN         17
-#define RXD_PIN         16
+// Broches : UART_PROTO_TX_PIN (17) / UART_PROTO_RX_PIN (16), dans board_pins.h
 #define RX_QUEUE_SIZE   16
 #define PARSER_TIMEOUT_MS 50   // reset parser si trame incomplète après 50ms
 
@@ -153,7 +160,12 @@ uint32_t task_rx_get_count_replay(void);
 ```
 
 **Règles** :
-- `uart_init()` est statique dans `task_rx.c`, appelée par `task_rx_init`
+- `uart_init()` est statique dans `task_rx.c`, appelée par `task_rx_init` ; installe le
+  driver UART2 et route ses broches (`uart_set_pin`). `task_tx` écrit sur ce même port
+  (`UART_NUM`) — il reste le seul écrivain
+- **Aucun `ESP_LOG*` sur le chemin de réception ni dans le cycle de `task_control`** :
+  tout rejet est compté (STATS), jamais loggué. Un log par trame est déclenchable par
+  l'émetteur et coûte jusqu'à ~87 µs par caractère dans le cycle (`rta_fmea.md` §4.3)
 - Parser = machine à états dans `parser_feed_byte()` — fonction séparée, testable
 - `xQueueSend` avec timeout 0 (non bloquant) — si queue pleine → dropped++
 - Compteurs `volatile`, pas de mutex — un seul écrivain (task_rx), lecture
@@ -326,7 +338,7 @@ et action de stress dédiée (rejeu de la dernière trame SPEED acceptée, cf. `
 
 ## Télémétrie STATS (0x83) — ordre du payload
 
-`TELEMETRY_STATS_COUNT = 7` × `uint32_t` little-endian = 28 octets, émis toutes les 1 s :
+`TELEMETRY_STATS_COUNT = 8` × `uint32_t` little-endian = 32 octets, émis toutes les 1 s :
 
 | # | Champ          | Écrivain unique   | Signification                                           |
 |---|----------------|-------------------|---------------------------------------------------------|
@@ -336,12 +348,14 @@ et action de stress dédiée (rejeu de la dernière trame SPEED acceptée, cf. `
 | 3 | `rx_replay`    | task_rx           | Nonce rejeté (rejeu / duplication / hors ordre)         |
 | 4 | `tx_output`    | task_tx           | Trames OUTPUT effectivement écrites sur l'UART          |
 | 5 | `tx_dropped`   | task_control      | OUTPUT non émis faute de place dans `queue_tx`          |
-| 6 | `uptime_s`     | task_telemetry    | Secondes depuis le démarrage de task_telemetry          |
+| 6 | `rx_invalid`   | task_control      | Trame saine (CRC + nonce OK) rejetée au dispatch : longueur de payload ≠ taille du type, valeur non finie / hors domaine, type non attendu en RX |
+| 7 | `uptime_s`     | task_telemetry    | Secondes depuis le démarrage de task_telemetry          |
 
 `tx_dropped` a été ajouté lors de la RTA : `enqueue_output()` bloquait jusqu'à 10 ms
 sur `queue_tx` pleine, terme de blocage hors budget ±5 ms — désormais timeout 0 +
-compteur (cf. `rta_fmea.md` §4.3). Côté PC : `struct.unpack('<7I', payload[:28])`
-dans `test/ecu_tester.py`.
+compteur (cf. `rta_fmea.md` §4.3). `rx_invalid` remplace les `ESP_LOGW` du dispatch
+(D1). Côté PC : tuple `STATS_FIELDS` dans `test/ecu_tester.py`, à tenir dans le même
+ordre.
 
 ---
 
@@ -369,14 +383,14 @@ leur statut de libs pures.
 
 ```
 test/unit/test_runner.h    → harness minimal, sans dépendance externe
-test/unit/test_protocol.c  → 90 tests (CRC, encode, decode, roundtrip, détection d'erreur,
-                              nonce anti-rejeu)
-test/unit/test_pid.c       → 41 tests (init, reset, P/I/D, saturation, anti-windup,
+test/unit/test_protocol.c  → 113 assertions (CRC, encode, decode, roundtrip, détection
+                              d'erreur, nonce anti-rejeu, validation des payloads)
+test/unit/test_pid.c       → 41 assertions (init, reset, P/I/D, saturation, anti-windup,
                               entrées NaN/Inf)
 test/unit/Makefile         → build natif, -fsanitize=address,undefined
 ```
 
-`make -C test/unit run` : build + exécution des deux suites. 131 tests, 0 échec, aucun
+`make -C test/unit run` : build + exécution des deux suites. 154 assertions, 0 échec, aucun
 warning, aucun trigger ASan/UBSan.
 
 ---
@@ -421,7 +435,7 @@ couvre donc pas `protocol_nonce_check_and_update`, testée unitairement à la pl
 | Job              | Runner       | Contenu                                                        |
 |------------------|--------------|-----------------------------------------------------------------|
 | `firmware-build` | ubuntu-latest| `espressif/esp-idf-ci-action@v1` (image Docker ESP-IDF v5.3.5), `idf.py build` cible esp32 |
-| `hosted-tests`   | ubuntu-latest| `make -C test/unit run` — 131 tests, ASan/UBSan                 |
+| `hosted-tests`   | ubuntu-latest| `make -C test/unit run` — 154 assertions, ASan/UBSan                 |
 | `fuzz-smoke`     | ubuntu-latest| build + corpus de départ + 30 s de fuzzing libFuzzer sur `protocol_decode`, artefacts uploadés si crash |
 
 `fuzz-smoke` n'est pas une campagne de fuzzing complète (voir section Fuzzing ci-dessus

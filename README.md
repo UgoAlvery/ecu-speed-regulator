@@ -75,7 +75,10 @@ Le projet repose sur une architecture **multi-tâches FreeRTOS** strictement iso
 
 ## Protocole de Communication
 
-Le bus CAN est simulé par une liaison **UART à 115 200 bauds**.
+Le bus CAN est simulé par une liaison **UART à 115 200 bauds**, sur l'**UART2** de l'ESP32
+(TX = GPIO17, RX = GPIO16, cf. `main/board_pins.h`). L'UART0 (port USB natif de la carte)
+est réservé à la console `ESP_LOG` / `idf.py monitor` : aucun log ne peut donc s'insérer
+dans une trame du protocole.
 
 ### Format de trame
 
@@ -124,9 +127,12 @@ simple contre un ECU : le rejeu d'une trame de commande légitime capturée sur 
 ### Gestion des erreurs de protocole
 
 Toute trame présentant un CRC invalide, une longueur incohérente, un ID inconnu ou un nonce
-rejeté est **rejetée silencieusement** — sans blocage ni perte d'état. Les compteurs
-`rx_crc_error`, `rx_dropped` et `rx_replay` sont incrémentés selon le cas et remontés via
-STATS.
+rejeté est **rejetée silencieusement** — sans blocage ni perte d'état. Une trame saine au
+niveau protocole mais dont le payload n'a pas exactement la taille attendue pour son type,
+ou porte une valeur hors domaine (float non fini, mode > 2), est rejetée de la même façon.
+Les compteurs `rx_crc_error`, `rx_dropped`, `rx_replay` et `rx_invalid` sont incrémentés
+selon le cas et remontés via STATS. Aucun rejet ne produit de log : un log par trame serait
+déclenchable par l'émetteur et coûterait du temps dans le cycle de régulation.
 
 ---
 
@@ -149,7 +155,7 @@ Un changement de mode est pris en compte **immédiatement** par `task_control`. 
 | EF-01 | Régulation périodique | OUTPUT émis toutes les **100 ms ± 5 ms** (jitter max) en mode AUTO                |
 | EF-02 | Algorithme PID        | PID discret avec anti-windup, sortie saturée dans `[0, 255]`                      |
 | EF-03 | Robustesse récepteur  | Trames malformées / incomplètes / invalides traitées sans blocage ni perte d'état |
-| EF-04 | Télémétrie            | STATS émis toutes les **1 s** : rx_valid, rx_crc_error, rx_dropped, rx_replay, tx_output, tx_dropped, uptime_s |
+| EF-04 | Télémétrie            | STATS émis toutes les **1 s** : rx_valid, rx_crc_error, rx_dropped, rx_replay, tx_output, tx_dropped, rx_invalid, uptime_s |
 | EF-05 | Failsafe              | Déclenchement sur silence > 2 s **ou** front GPIO externe (réponse < 5 ms)        |
 | EF-06 | Reprise failsafe      | Reprise en mode AUTO dès réception d'un nouveau `MODE_SET` valide                 |
 
@@ -225,6 +231,7 @@ ecu/
 └── main/
     ├── CMakeLists.txt
     ├── main.c                  ← app_main : init + création tâches + démarrage scheduler
+    ├── board_pins.h            ← Brochage ESP32 #1 (UART2, failsafe, LED, TWAI réservé)
     ├── ecu_state.h / .c        ← État partagé (mode, setpoint, speed, output, last_rx_tick)
     ├── protocol.h / .c         ← encode_frame, decode_frame, compute_crc — lib pure sans état
     ├── pid.h / .c              ← Calcul PID discret — lib pure sans état global
@@ -246,9 +253,14 @@ ecu/
 # Compiler
 idf.py build
 
-# Flasher et ouvrir le moniteur série
+# Flasher et ouvrir la console (port USB natif de la carte, UART0)
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
+
+> Deux ports série : le port USB natif de la carte (flash + console `ESP_LOG`) et un
+> adaptateur USB-TTL 3,3 V câblé sur l'UART2 protocole (GPIO16 ← TX adaptateur,
+> GPIO17 → RX adaptateur, GND commun). Le script de test parle **uniquement** à
+> l'adaptateur.
 
 | Commande            | Action                                 |
 |---------------------|----------------------------------------|
@@ -266,7 +278,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 ### Tests automatisés (sans matériel)
 
 ```bash
-make -C test/unit run                 # 131 tests unitaires protocol.c + pid.c (ASan/UBSan)
+make -C test/unit run                 # 154 assertions protocol.c + pid.c (ASan/UBSan)
 make -C test/fuzz fuzz SECONDS=60     # fuzzing libFuzzer de protocol_decode
 ```
 
@@ -283,5 +295,5 @@ Exécutés à chaque push par la CI GitHub Actions, avec le build firmware ESP-I
 
 ```bash
 pip install pyserial
-python test/ecu_tester.py   # adapter SERIAL_PORT si nécessaire
+python test/ecu_tester.py   # SERIAL_PORT = adaptateur USB-TTL (UART2), pas le port USB de la carte
 ```

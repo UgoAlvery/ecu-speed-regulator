@@ -22,10 +22,10 @@ Valeurs extraites de `sdkconfig` et `main.c` (état actuel du repo) :
 | Tick | `CONFIG_FREERTOS_HZ=100` → **10 ms** | Granularité de `vTaskDelayUntil`, tranche de time-slicing |
 | Time slicing | activé (défaut IDF) | Rotation entre tâches prêtes de même priorité à chaque tick |
 | Affinité | `xTaskCreate` → `tskNO_AFFINITY` | Les 5 tâches peuvent tourner sur l'un ou l'autre cœur |
-| UART protocole | UART0, 115 200 bauds 8N1 → **86,8 µs/octet** | Débit max 11 520 o/s |
+| UART protocole | UART2 (GPIO17 TX / GPIO16 RX), 115 200 bauds 8N1 → **86,8 µs/octet** | Débit max 11 520 o/s |
 | Buffer RX UART | `UART_BUF_SIZE * 2` = 2048 o | ≈ 178 ms de flood absorbable |
 | Buffer TX UART | 0 (pas de ring buffer) | `uart_write_bytes` bloque jusqu'à ce que la trame tienne dans la FIFO HW (128 o) |
-| Console `ESP_LOG` | **UART0 aussi** | Les logs partagent le lien avec le protocole (cf. §4.3, FMEA F-14) |
+| Console `ESP_LOG` | UART0, séparé du protocole depuis D1 | Plus d'octet de log dans une trame ; plus aucun log dans le cycle de `task_control` (§4.3) |
 | Mutex | `mutex_ecu_state`, héritage de priorité | Un seul mutex, jamais imbriqué |
 
 **Choix d'analyse** : la RTA est conduite en **monoprocesseur**, comme si les
@@ -191,8 +191,11 @@ mutex, avec le spinlock IDF. Ordre de grandeur : quelques µs. ⏳ à mesurer.
      `ESP_LOGD` (compilé mais filtré au niveau INFO) pour ne pas recréer ce
      problème.
 
-   ⏳ **Risque ouvert** : passer les deux `ESP_LOGW` « payload trop court »
-   en `ESP_LOGD` avec un compteur (cf. R-3).
+   ✅ **Traité (D1)** : tous les `ESP_LOG*` de la boucle et du dispatch de
+   `task_control` ont été supprimés, remplacés par le compteur `rx_invalid`
+   (STATS). Il ne reste que le log de démarrage, hors cycle. Le protocole
+   est en plus sur UART2, donc une écriture console ne concurrence plus la
+   FIFO TX de `task_tx`.
 
 ---
 

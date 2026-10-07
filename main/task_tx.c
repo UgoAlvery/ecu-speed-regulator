@@ -4,6 +4,7 @@
 
 #include "task_tx.h"
 #include "protocol.h"
+#include "task_rx.h"
 
 #include <string.h>
 
@@ -17,7 +18,7 @@
 
 static const char *TAG = "task_tx";
 
-#define TASK_TX_UART_NUM    UART_NUM_0
+#define TASK_TX_UART_NUM    UART_NUM   /* UART2 protocole, installé par task_rx_init */
 
 #define TASK_TX_WRITE_TIMEOUT_MS  20
 

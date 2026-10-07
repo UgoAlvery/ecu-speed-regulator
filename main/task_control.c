@@ -1,6 +1,5 @@
 #include "task_control.h"
 
-#include <math.h>
 #include <string.h>
 
 #include "ecu_state.h"
@@ -30,6 +29,14 @@ static QueueHandle_t s_tx_queue = NULL;
  * ±5 ms de task_control. */
 static volatile uint32_t s_count_tx_dropped = 0;
 
+/* Trames saines au niveau protocole (CRC + nonce OK) mais rejetées au
+ * dispatch : longueur de payload différente de celle du type, valeur non
+ * finie / hors domaine, ou type non attendu en réception. Remplace les
+ * ESP_LOG* du dispatch : un log par trame rejetée est déclenchable par
+ * l'émetteur et coûte du temps dans le cycle 100 ms (rta_fmea.md §4.3).
+ * Même écrivain unique (task_control). */
+static volatile uint32_t s_count_rx_invalid = 0;
+
 static void dispatch_pending_frames(void);
 static void dispatch_frame(const ecu_frame_t *frame);
 static void run_pid_and_emit(pid_t *pid);
@@ -45,6 +52,7 @@ void task_control_init(const QueueHandle_t rx_queue, const QueueHandle_t tx_queu
 }
 
 uint32_t task_control_get_count_tx_dropped(void) { return s_count_tx_dropped; }
+uint32_t task_control_get_count_rx_invalid(void) { return s_count_rx_invalid; }
 
 void task_control(void *pvParameters)
 {
@@ -74,13 +82,8 @@ void task_control(void *pvParameters)
         if (mode != prev_mode) {
             if (mode != ECU_MODE_AUTO) {
                 ecu_state_set_output(0.0f);
-                pid_reset(&pid);
-                ESP_LOGI(TAG, "Transition mode %d→%d : output=0, PID reset",
-                         prev_mode, mode);
-            } else {
-                pid_reset(&pid);
-                ESP_LOGI(TAG, "Entrée en mode AUTO : PID reset");
             }
+            pid_reset(&pid);
             prev_mode = mode;
         }
 
@@ -107,57 +110,39 @@ static void dispatch_pending_frames(void)
 
 static void dispatch_frame(const ecu_frame_t *frame)
 {
+    /* Validation de longueur et de domaine dans protocol.c (lib pure, testée
+     * en host). Valeur rejetée : la dernière valeur valide est conservée. */
+    float   val;
+    uint8_t raw_mode;
+
     switch (frame->type) {
 
-    case MSG_SETPOINT: {
-        if (frame->payload_len < sizeof(float)) {
-            ESP_LOGW(TAG, "SETPOINT : payload trop court (%u B)", frame->payload_len);
-            break;
+    case MSG_SETPOINT:
+        if (protocol_parse_f32(frame, &val)) {
+            ecu_state_set_setpoint(val);
+        } else {
+            s_count_rx_invalid++;
         }
-        float val;
-        memcpy(&val, frame->payload, sizeof(float));
-        if (!isfinite(val)) {
-            ESP_LOGD(TAG, "SETPOINT : valeur non finie, ignorée");
-            break;
-        }
-        ecu_state_set_setpoint(val);
-        ESP_LOGD(TAG, "SETPOINT = %.2f", val);
         break;
-    }
 
-    case MSG_SPEED: {
-        if (frame->payload_len < sizeof(float)) {
-            ESP_LOGW(TAG, "SPEED : payload trop court (%u B)", frame->payload_len);
-            break;
+    case MSG_SPEED:
+        if (protocol_parse_f32(frame, &val)) {
+            ecu_state_set_speed(val);
+        } else {
+            s_count_rx_invalid++;
         }
-        float val;
-        memcpy(&val, frame->payload, sizeof(float));
-        if (!isfinite(val)) {
-            ESP_LOGD(TAG, "SPEED : valeur non finie, ignorée");
-            break;
-        }
-        ecu_state_set_speed(val);
-        ESP_LOGD(TAG, "SPEED = %.2f", val);
         break;
-    }
 
-    case MSG_MODE_SET: {
-        if (frame->payload_len < sizeof(uint8_t)) {
-            ESP_LOGW(TAG, "MODE_SET : payload trop court (%u B)", frame->payload_len);
-            break;
+    case MSG_MODE_SET:
+        if (protocol_parse_mode(frame, &raw_mode)) {
+            ecu_state_set_mode((ecu_mode_t)raw_mode);
+        } else {
+            s_count_rx_invalid++;
         }
-        const uint8_t raw_mode = frame->payload[0];
-        if (raw_mode > ECU_MODE_AUTO) {
-            ESP_LOGW(TAG, "MODE_SET : valeur inconnue 0x%02X, ignorée", raw_mode);
-            break;
-        }
-        ecu_state_set_mode((ecu_mode_t)raw_mode);
-        ESP_LOGI(TAG, "MODE_SET → %u", raw_mode);
         break;
-    }
 
     default:
-        ESP_LOGD(TAG, "Type 0x%02X ignoré en dispatch", frame->type);
+        s_count_rx_invalid++;
         break;
     }
 }

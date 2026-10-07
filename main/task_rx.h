@@ -4,12 +4,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "protocol.h"
+#include "board_pins.h"
 
-#define UART_NUM        UART_NUM_0
+/* Protocole sur UART2 (broches dans board_pins.h) : UART0 reste réservé à la
+ * console ESP_LOG / idf.py monitor, qui ne peut donc plus s'insérer au milieu
+ * d'une trame (ENF-03). task_tx écrit sur ce même port. */
+#define UART_NUM        UART_NUM_2
 #define UART_BUF_SIZE   1024
 #define UART_BAUD_RATE  115200
-#define TXD_PIN         17
-#define RXD_PIN         16
 #define RX_QUEUE_SIZE   16
 
 void task_rx_init(QueueHandle_t rx_queue);

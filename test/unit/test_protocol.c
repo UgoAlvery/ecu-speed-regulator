@@ -1,5 +1,6 @@
 #include "test_runner.h"
 #include "protocol.h"
+#include <math.h>
 #include <string.h>
 
 /* ========================================================================== */
@@ -474,6 +475,117 @@ static void test_nonce_half_window_ambiguity_rejected(void)
 /* main                                                                       */
 /* ========================================================================== */
 
+/* ========================================================================== */
+/* protocol_parse_f32 / protocol_parse_mode — validation applicative          */
+/* ========================================================================== */
+
+static ecu_frame_t make_frame(uint8_t type, const void *payload, uint16_t len)
+{
+    ecu_frame_t f;
+    memset(&f, 0, sizeof(f));
+    f.type        = type;
+    f.payload_len = len;
+    if (len > 0) memcpy(f.payload, payload, len);
+    return f;
+}
+
+static void test_parse_f32_valid(void)
+{
+    const float v = 42.5f;
+    const ecu_frame_t f = make_frame(MSG_SETPOINT, &v, sizeof(v));
+    float out = 0.0f;
+    TEST_ASSERT_TRUE(protocol_parse_f32(&f, &out));
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 42.5f, out);
+}
+
+static void test_parse_f32_short_payload_rejected(void)
+{
+    const uint8_t p[3] = {0, 0, 0};
+    const ecu_frame_t f = make_frame(MSG_SPEED, p, sizeof(p));
+    float out = 7.0f;
+    TEST_ASSERT_FALSE(protocol_parse_f32(&f, &out));
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 7.0f, out);   /* *out non modifié */
+}
+
+static void test_parse_f32_long_payload_rejected(void)
+{
+    const uint8_t p[5] = {0, 0, 0x28, 0x42, 0};
+    const ecu_frame_t f = make_frame(MSG_SPEED, p, sizeof(p));
+    float out = 0.0f;
+    TEST_ASSERT_FALSE(protocol_parse_f32(&f, &out));
+}
+
+static void test_parse_f32_empty_payload_rejected(void)
+{
+    const ecu_frame_t f = make_frame(MSG_SETPOINT, NULL, 0);
+    float out = 0.0f;
+    TEST_ASSERT_FALSE(protocol_parse_f32(&f, &out));
+}
+
+static void test_parse_f32_nan_rejected(void)
+{
+    const float v = NAN;
+    const ecu_frame_t f = make_frame(MSG_SETPOINT, &v, sizeof(v));
+    float out = 1.0f;
+    TEST_ASSERT_FALSE(protocol_parse_f32(&f, &out));
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.0f, out);
+}
+
+static void test_parse_f32_inf_rejected(void)
+{
+    const float v = -INFINITY;
+    const ecu_frame_t f = make_frame(MSG_SPEED, &v, sizeof(v));
+    float out = 0.0f;
+    TEST_ASSERT_FALSE(protocol_parse_f32(&f, &out));
+}
+
+static void test_parse_f32_null_args(void)
+{
+    const float v = 1.0f;
+    const ecu_frame_t f = make_frame(MSG_SPEED, &v, sizeof(v));
+    float out;
+    TEST_ASSERT_FALSE(protocol_parse_f32(NULL, &out));
+    TEST_ASSERT_FALSE(protocol_parse_f32(&f, NULL));
+}
+
+static void test_parse_mode_all_valid_values(void)
+{
+    for (uint8_t m = 0; m <= PROTOCOL_MODE_MAX; m++) {
+        const ecu_frame_t f = make_frame(MSG_MODE_SET, &m, 1);
+        uint8_t out = 0xFF;
+        TEST_ASSERT_TRUE(protocol_parse_mode(&f, &out));
+        TEST_ASSERT_EQUAL_UINT8(m, out);
+    }
+}
+
+static void test_parse_mode_out_of_range_rejected(void)
+{
+    const uint8_t m = PROTOCOL_MODE_MAX + 1u;
+    const ecu_frame_t f = make_frame(MSG_MODE_SET, &m, 1);
+    uint8_t out = 0xAB;
+    TEST_ASSERT_FALSE(protocol_parse_mode(&f, &out));
+    TEST_ASSERT_EQUAL_UINT8(0xAB, out);
+}
+
+static void test_parse_mode_wrong_length_rejected(void)
+{
+    const uint8_t p[2] = {PROTOCOL_MODE_MAX, 0};
+    const ecu_frame_t f2 = make_frame(MSG_MODE_SET, p, 2);
+    const ecu_frame_t f0 = make_frame(MSG_MODE_SET, NULL, 0);
+    uint8_t out;
+    TEST_ASSERT_FALSE(protocol_parse_mode(&f2, &out));
+    TEST_ASSERT_FALSE(protocol_parse_mode(&f0, &out));
+}
+
+static void test_parse_mode_null_args(void)
+{
+    const uint8_t m = 0;
+    const ecu_frame_t f = make_frame(MSG_MODE_SET, &m, 1);
+    uint8_t out;
+    TEST_ASSERT_FALSE(protocol_parse_mode(NULL, &out));
+    TEST_ASSERT_FALSE(protocol_parse_mode(&f, NULL));
+}
+
 int main(void)
 {
     TEST_SUITE_BEGIN("protocol");
@@ -530,6 +642,18 @@ int main(void)
     RUN_TEST(test_nonce_rejection_does_not_update_ctx);
     RUN_TEST(test_nonce_wraparound_tolerated);
     RUN_TEST(test_nonce_half_window_ambiguity_rejected);
+
+    RUN_TEST(test_parse_f32_valid);
+    RUN_TEST(test_parse_f32_short_payload_rejected);
+    RUN_TEST(test_parse_f32_long_payload_rejected);
+    RUN_TEST(test_parse_f32_empty_payload_rejected);
+    RUN_TEST(test_parse_f32_nan_rejected);
+    RUN_TEST(test_parse_f32_inf_rejected);
+    RUN_TEST(test_parse_f32_null_args);
+    RUN_TEST(test_parse_mode_all_valid_values);
+    RUN_TEST(test_parse_mode_out_of_range_rejected);
+    RUN_TEST(test_parse_mode_wrong_length_rejected);
+    RUN_TEST(test_parse_mode_null_args);
 
     TEST_SUITE_SUMMARY();
 }

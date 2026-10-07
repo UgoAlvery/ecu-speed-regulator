@@ -14,6 +14,9 @@
 #define MSG_ALARM     0x85
 #define MSG_DBG       0xFF
 
+/* Valeur max d'un MODE_SET (0=OFF, 1=MANUAL, 2=AUTO, cf. ecu_mode_t). */
+#define PROTOCOL_MODE_MAX  2u
+
 #define PROTOCOL_START_BYTE        0xAA
 #define PROTOCOL_MAX_PAYLOAD_SIZE  128
 #define PROTOCOL_NONCE_SIZE        2
@@ -49,5 +52,13 @@ void protocol_nonce_ctx_init(protocol_nonce_ctx_t *ctx);
  * numéros de séquence TCP) : rejette rejeu, duplication et trames retardées
  * hors ordre. Met à jour ctx uniquement en cas d'acceptation. */
 bool protocol_nonce_check_and_update(protocol_nonce_ctx_t *ctx, uint16_t nonce);
+
+/* Validation applicative des payloads reçus (trame déjà décodée, CRC OK).
+ * Retournent false — et ne touchent pas *out — si la longueur du payload n'est
+ * pas exactement celle attendue pour le type, ou si la valeur est hors domaine.
+ * SETPOINT / SPEED : float32 LE, 4 octets, valeur finie (ni NaN ni Inf).
+ * MODE_SET         : uint8, 1 octet, valeur <= PROTOCOL_MODE_MAX. */
+bool protocol_parse_f32(const ecu_frame_t *frame, float *out);
+bool protocol_parse_mode(const ecu_frame_t *frame, uint8_t *out);
 
 #endif
