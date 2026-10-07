@@ -1,6 +1,8 @@
 #include "test_runner.h"
 #include "pid.h"
 
+#include <math.h>
+
 /* ========================================================================== */
 /* pid_init                                                                   */
 /* ========================================================================== */
@@ -230,6 +232,59 @@ static void test_pid_anti_windup_no_freeze_when_unsaturated(void)
 /* main                                                                       */
 /* ========================================================================== */
 
+/* ========================================================================== */
+/* Entrées non finies (NaN / Inf)                                             */
+/* ========================================================================== */
+
+static void test_pid_nan_setpoint_returns_out_min(void)
+{
+    pid_t pid;
+    pid_init(&pid, 2.0f, 0.8f, 0.02f, 0.1f, 0.0f, 255.0f);
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.0f, pid_compute(&pid, NAN, 10.0f));
+}
+
+static void test_pid_nan_measure_returns_out_min(void)
+{
+    pid_t pid;
+    pid_init(&pid, 2.0f, 0.8f, 0.02f, 0.1f, 0.0f, 255.0f);
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.0f, pid_compute(&pid, 50.0f, NAN));
+}
+
+static void test_pid_inf_setpoint_returns_out_min(void)
+{
+    pid_t pid;
+    pid_init(&pid, 2.0f, 0.8f, 0.02f, 0.1f, 0.0f, 255.0f);
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.0f, pid_compute(&pid, INFINITY, 10.0f));
+}
+
+/* Régression : avant le garde, un seul NaN figeait l'intégrale à NaN et toutes
+ * les sorties suivantes valaient NaN jusqu'au prochain pid_reset(). */
+static void test_pid_nan_does_not_poison_state(void)
+{
+    pid_t ref, pid;
+    pid_init(&ref, 2.0f, 0.8f, 0.02f, 0.1f, 0.0f, 255.0f);
+    pid_init(&pid, 2.0f, 0.8f, 0.02f, 0.1f, 0.0f, 255.0f);
+
+    (void)pid_compute(&ref, 50.0f, 40.0f);
+    (void)pid_compute(&pid, 50.0f, 40.0f);
+    (void)pid_compute(&pid, NAN, 40.0f);
+
+    const float expected = pid_compute(&ref, 50.0f, 45.0f);
+    const float actual   = pid_compute(&pid, 50.0f, 45.0f);
+    TEST_ASSERT_FALSE(isnan(actual));
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, expected, actual);
+}
+
+/* Erreur finie mais termes P et D qui débordent en sens opposés : +Inf + -Inf
+ * = NaN dans la somme, rattrapé par le garde de sortie. */
+static void test_pid_inf_derivative_nan_returns_out_min(void)
+{
+    pid_t pid;
+    pid_init(&pid, 10.0f, 0.0f, -1.0f, 0.1f, 0.0f, 255.0f);
+    pid.prev_err = -3.0e38f;
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.0f, pid_compute(&pid, 3.0e38f, 0.0f));
+}
+
 int main(void)
 {
     TEST_SUITE_BEGIN("pid");
@@ -258,6 +313,11 @@ int main(void)
     RUN_TEST(test_pid_anti_windup_lower_freezes_integral);
     RUN_TEST(test_pid_anti_windup_lower_output_clamped);
     RUN_TEST(test_pid_anti_windup_no_freeze_when_unsaturated);
+    RUN_TEST(test_pid_nan_setpoint_returns_out_min);
+    RUN_TEST(test_pid_nan_measure_returns_out_min);
+    RUN_TEST(test_pid_inf_setpoint_returns_out_min);
+    RUN_TEST(test_pid_nan_does_not_poison_state);
+    RUN_TEST(test_pid_inf_derivative_nan_returns_out_min);
 
     TEST_SUITE_SUMMARY();
 }

@@ -2,6 +2,7 @@
 #include "pid.h"
 
 #include <stddef.h>
+#include <math.h>
 #include <assert.h>
 
 /* -------------------------------------------------------------------------- */
@@ -51,6 +52,14 @@ float pid_compute(pid_t *pid, const float setpoint, const float measure)
 
     const float err = setpoint - measure;
 
+    /* Entrée non finie (NaN/Inf transmis sur le bus avec un CRC valide, ou
+     * dépassement de setpoint - measure) : sans ce garde, NaN traverse les
+     * comparaisons de saturation et se fige dans l'intégrale jusqu'au prochain
+     * pid_reset(). Repli sur out_min (moteur coupé), état PID inchangé. */
+    if (!isfinite(err)) {
+        return pid->out_min;
+    }
+
     float integral_candidate = pid->integral + err * pid->dt;
 
     const float derivative = (err - pid->prev_err) / pid->dt;
@@ -59,6 +68,9 @@ float pid_compute(pid_t *pid, const float setpoint, const float measure)
                  + (pid->ki * integral_candidate)
                  + (pid->kd * derivative);
 
+    if (isnan(output)) {
+        return pid->out_min;
+    }
 
     if (output > pid->out_max) {
         output = pid->out_max;
