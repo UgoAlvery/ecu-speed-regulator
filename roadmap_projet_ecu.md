@@ -44,17 +44,18 @@ un profil embarqué industriel/sûreté.
      l'analyseur logique, sous flood UART actif.
    - Alternative/complément : SEGGER SystemView via `esp_apptrace` (natif ESP-IDF) pour
      avoir l'historique d'ordonnancement complet, pas juste un pire cas ponctuel.
-3. **RTA formelle** sur les 5 tâches :
+3. **RTA formelle** sur les 5 tâches — ✅ analyse structurelle faite (`rta_fmea.md`),
+   WCET numériques ⏳ en attente de l'action 2 :
    - Modéliser `task_rx`, `task_tx`, `task_failsafe` comme sporadiques (temps
      d'inter-arrivée minimal, pas une période fictive).
    - Calculer le blocking term introduit par `mutex_ecu_state` (héritage de priorité) —
      le chiffrer, pas juste affirmer qu'il est activé.
    - Vérifier et documenter formellement le cas `task_rx` / `task_control` à priorité
      égale (config `configUSE_TIME_SLICING`) — actuellement une hypothèse non prouvée.
-4. **FMEA/AMDEC** — table modes de défaillance → effet → détection → mitigation →
+4. ✅ **FMEA/AMDEC** (`rta_fmea.md` §7, recommandations R-1…R-8 à implémenter) — table modes de défaillance → effet → détection → mitigation →
    risque résiduel (voir squelette déjà esquissé : silence UART, flood, collision CRC,
    stack overflow, deadlock mutex, coupure alimentation, GPIO non testé).
-5. **Watchdog matériel** (Task Watchdog Timer ESP-IDF) en complément du failsafe
+5. ✅ **Watchdog matériel** (Task Watchdog Timer ESP-IDF, validation sur cible ⏳) en complément du failsafe
    applicatif — actuellement le failsafe dépend du bon fonctionnement des tâches
    elles-mêmes ; un TWDT couvre le cas où une tâche est totalement bloquée.
 
@@ -70,10 +71,10 @@ d'écrire les tests unitaires (axe 3) évite de devoir les réécrire.
 
 ### Actions concrètes
 
-1. **CRC16 (ou CRC8 polynomial)** à la place du XOR simple — documenter explicitement
+1. ✅ **CRC16 (ou CRC8 polynomial)** à la place du XOR simple — documenter explicitement
    pourquoi le XOR du TP est insuffisant (n'importe quelle erreur à nombre pair de bits
    inversés passe inaperçue).
-2. **Authentification légère des trames** (HMAC tronqué ou simple nonce/compteur
+2. ✅ **Authentification légère des trames** (HMAC tronqué ou simple nonce/compteur
    anti-rejeu) — pertinent pour un profil sécurité embarquée, montre que tu penses
    au-delà de la robustesse fonctionnelle.
 3. Mettre à jour `technical_reference.md` et le script de test Python en conséquence.
@@ -89,14 +90,14 @@ enseignant. Un projet perso doit se valider tout seul, en continu.
 
 ### Actions concrètes
 
-1. **Tests unitaires hébergés** (sur machine de dev, pas sur cible) pour les modules libs
+1. ✅ **Tests unitaires hébergés** (sur machine de dev, pas sur cible) pour les modules libs
    pures : `protocol.c` et `pid.c`. Unity (natif ESP-IDF) ou GoogleTest si tu veux rester
    proche de ton usage C++ habituel — nécessite d'isoler ces fichiers de toute dépendance
    FreeRTOS/ESP-IDF (déjà annoncé comme "lib pure sans état global", donc faisable sans
    trop de refactor).
-2. **Fuzzing de `protocol_decode`** — c'est la fonction qui parse un flux non fiable,
+2. ✅ **Fuzzing de `protocol_decode`** — c'est la fonction qui parse un flux non fiable,
    candidate naturelle. AFL ou libFuzzer, compilé nativement (host).
-3. **CI GitHub Actions** : build firmware ESP-IDF + exécution des tests hébergés à chaque
+3. ✅ **CI GitHub Actions** : build firmware ESP-IDF + exécution des tests hébergés à chaque
    push. Le repo `ecu-speed-regulator` existe déjà, donc juste ajouter le workflow.
 4. **Automatisation du test hardware-in-the-loop** — le script Python de stress test
    existe déjà manuellement ; l'intégrer dans une routine reproductible (rapport de test

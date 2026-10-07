@@ -18,6 +18,7 @@ Implémentation d'un ECU (*Electronic Control Unit*) de régulation de vitesse e
 - [Exigences non fonctionnelles](#exigences-non-fonctionnelles)
 - [Algorithme PID](#algorithme-pid)
 - [Mécanisme Failsafe](#mécanisme-failsafe)
+- [Analyse temps réel & sûreté](#analyse-temps-réel--sûreté)
 - [Structure du projet](#structure-du-projet)
 - [Build & Flash](#build--flash)
 - [Tests](#tests)
@@ -148,7 +149,7 @@ Un changement de mode est pris en compte **immédiatement** par `task_control`. 
 | EF-01 | Régulation périodique | OUTPUT émis toutes les **100 ms ± 5 ms** (jitter max) en mode AUTO                |
 | EF-02 | Algorithme PID        | PID discret avec anti-windup, sortie saturée dans `[0, 255]`                      |
 | EF-03 | Robustesse récepteur  | Trames malformées / incomplètes / invalides traitées sans blocage ni perte d'état |
-| EF-04 | Télémétrie            | STATS émis toutes les **1 s** : rx_valid, rx_crc_error, rx_dropped, tx_output     |
+| EF-04 | Télémétrie            | STATS émis toutes les **1 s** : rx_valid, rx_crc_error, rx_dropped, rx_replay, tx_output, tx_dropped, uptime_s |
 | EF-05 | Failsafe              | Déclenchement sur silence > 2 s **ou** front GPIO externe (réponse < 5 ms)        |
 | EF-06 | Reprise failsafe      | Reprise en mode AUTO dès réception d'un nouveau `MODE_SET` valide                 |
 
@@ -160,8 +161,9 @@ Un changement de mode est pris en compte **immédiatement** par `task_control`. 
 |--------|--------------------------------------------------------------------------------------|
 | ENF-01 | **Déterminisme** — période de régulation garantie même sous flood UART               |
 | ENF-02 | **Isolation des défaillances** — anomalie RX sans impact sur régulation ni failsafe  |
-| ENF-03 | **Intégrité des émissions** — aucun entrelacement d'octets inter-trames (mutex TX)   |
+| ENF-03 | **Intégrité des émissions** — aucun entrelacement d'octets inter-trames (`task_tx` seul écrivain UART) |
 | ENF-04 | **Absence d'inversion de priorité** — mutex avec héritage de priorité activé         |
+| ENF-05 | **Supervision matérielle** — Task Watchdog (TWDT) sur les 5 tâches, reboot en état sûr (OFF) après 2 s de blocage |
 
 ---
 
@@ -175,6 +177,9 @@ integral = integral + e[k] × dt      (bloqué si output saturé et erreur dans 
 output   = Kp×e[k] + Ki×integral + Kd×(e[k] - e[k-1])/dt
 output   = clamp(output, 0.0, 255.0)
 ```
+
+Entrée ou sortie non finie (NaN/Inf) → sortie forcée à `0.0`, état PID inchangé. Les
+SETPOINT/SPEED non finis sont en plus rejetés dès le dispatch.
 
 | Paramètre      | Valeur par défaut |
 |----------------|-------------------|
@@ -191,7 +196,7 @@ output   = clamp(output, 0.0, 255.0)
 Deux événements déclenchent le failsafe **indépendamment** :
 
 1. **Silence UART** — aucune trame valide reçue depuis **> 2 secondes**, détecté par `task_failsafe` via comparaison de `xTaskGetTickCount()` avec le dernier tick valide stocké dans `ecu_state`.
-2. **Front GPIO externe** — ISR qui donne un sémaphore binaire à `task_failsafe`, temps de réponse **< 5 ms**.
+2. **Front GPIO externe** — ISR qui donne un sémaphore binaire à `task_failsafe`, temps de réponse **< 5 ms** sur l'état interne (l'émission de l'ALARM sur la ligne dépend ensuite de `task_tx`, cf. [`rta_fmea.md`](rta_fmea.md) §6).
 
 Actions au déclenchement (atomiques) :
 - Commande moteur forcée à `0`
@@ -199,6 +204,16 @@ Actions au déclenchement (atomiques) :
 - Émission immédiate d'un message `ALARM (0x85)` avec cause identifiée en clair
 
 **Reprise** : réception d'un message `MODE_SET` valide relance l'ECU normalement depuis n'importe quel mode.
+
+**Dernier rempart** : si une tâche (y compris `task_failsafe`) se bloque, le Task Watchdog
+ESP-IDF déclenche un reboot au bout de 2 s ; l'ECU redémarre en mode `OFF`, commande 0.
+
+## Analyse temps réel & sûreté
+
+[`rta_fmea.md`](rta_fmea.md) : modèle de tâches sporadiques, équations de RTA, bornes de
+blocage sur le mutex, cas `task_rx`/`task_control` à priorité égale, décomposition du
+chemin failsafe, AMDEC/FMEA (18 modes de défaillance) et recommandations. Les WCET sont
+encore symboliques en attente de la campagne de mesure sur cible.
 
 ---
 
@@ -247,6 +262,17 @@ idf.py -p /dev/ttyUSB0 flash monitor
 ---
 
 ## Tests
+
+### Tests automatisés (sans matériel)
+
+```bash
+make -C test/unit run                 # 131 tests unitaires protocol.c + pid.c (ASan/UBSan)
+make -C test/fuzz fuzz SECONDS=60     # fuzzing libFuzzer de protocol_decode
+```
+
+Exécutés à chaque push par la CI GitHub Actions, avec le build firmware ESP-IDF.
+
+### Test sur cible (`test/ecu_tester.py`)
 
 | Phase                 | Durée | Description                                                        |
 |-----------------------|-------|--------------------------------------------------------------------|

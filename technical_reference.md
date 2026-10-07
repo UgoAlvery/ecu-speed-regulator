@@ -20,7 +20,7 @@ pid.h / .c          → lib pure sans état global (struct pid_t passée en para
 failsafe.h / .c     → task_failsafe + ISR GPIO
 task_rx.h / .c      → UART init + parser état machine + compteurs RX
 task_control.h / .c → dispatch trames + boucle PID 100 ms
-task_tx.h / .c      → émission UART protégée par mutex
+task_tx.h / .c      → émission UART (seul écrivain UART, seul encodeur)
 task_telemetry.h/.c → émission STATS 1 s
 ```
 
@@ -35,17 +35,30 @@ dédiée serait du overhead sans bénéfice.
 
 ## Tâches FreeRTOS
 
-| Tâche            | Priorité | Périodicité    | Stack (mots) | Mécanisme de réveil                         |
-|------------------|----------|----------------|--------------|---------------------------------------------|
-| `task_failsafe`  | 5        | < 5 ms réponse | 2048         | sémaphore binaire (ISR GPIO) + polling tick |
-| `task_rx`        | 4        | event-driven   | 4096         | `uart_read_bytes` bloquant 50 ms            |
-| `task_control`   | 4        | 100 ms strict  | 4096         | `vTaskDelayUntil`                           |
-| `task_tx`        | 3        | event-driven   | 2048         | `xQueueReceive` bloquant                    |
-| `task_telemetry` | 2        | 1 s            | 2048         | `vTaskDelayUntil`                           |
+| Tâche            | Priorité | Périodicité    | Stack (octets) | Mécanisme de réveil                         |
+|------------------|----------|----------------|----------------|---------------------------------------------|
+| `task_failsafe`  | 5        | < 5 ms réponse | 2048           | sémaphore binaire (ISR GPIO) + polling 100 ms |
+| `task_rx`        | 4        | event-driven   | 4096           | `uart_read_bytes` bloquant 50 ms            |
+| `task_control`   | 4        | 100 ms strict  | 4096           | `vTaskDelayUntil`                           |
+| `task_tx`        | 3        | event-driven   | 4096           | `xQueueReceive` borné 500 ms (TWDT)         |
+| `task_telemetry` | 2        | 1 s            | 2048           | `vTaskDelayUntil`                           |
 
-> `task_rx` et `task_control` ont la même priorité (4). C'est intentionnel :
-> task_rx est event-driven (bloquée sur UART), task_control est périodique.
-> Elles ne se préemptent pas mutuellement en pratique.
+> Sous ESP-IDF, la profondeur de pile de `xTaskCreate` est en **octets**, pas
+> en mots (contrairement au FreeRTOS vanilla) : les macros `STACK_*_WORDS` de
+> `main.c` sont mal nommées, les valeurs ci-dessus sont celles réellement
+> allouées. Marges non mesurées — cf. `rta_fmea.md` R-8.
+
+> `task_rx` et `task_control` ont la même priorité (4). En régime nominal
+> (task_rx bloquée sur UART l'essentiel du temps) elles ne se préemptent
+> quasiment pas. **Sous flood UART soutenu, la RTA formelle (`rta_fmea.md`
+> §5) montre que ce n'est pas garanti** : si le coût de traitement d'un octet
+> `C_rx` atteint 86,8 µs (temps d'un octet à 115 200 bauds), `task_rx` reste
+> continûment *ready* ; round-robin (`configUSE_TIME_SLICING=1`, tranche
+> 10 ms, « best effort » sous IDF) et passage de mutex à priorité égale
+> donnent alors un pire cas de gigue de 10–20 ms, hors budget ±5 ms d'EF-01.
+> Si `C_rx < 86,8 µs` (attendu), l'interférence se limite au vidage du
+> backlog RX. Tranché par la mesure de `C_rx` (axe 1 action 2) — risque
+> ouvert, pas une garantie. Correctif structurel proposé : `rta_fmea.md` R-1.
 
 ---
 
@@ -55,11 +68,19 @@ dédiée serait du overhead sans bénéfice.
 |-----------------------|-------------------|---------------------------------------------------------|
 | Queue (ecu_frame_t)   | `queue_frames`    | task_rx → task_control                                  |
 | Queue (tx_message_t)  | `queue_tx`        | task_control, task_telemetry, task_failsafe → task_tx   |
-| Mutex (héritage prio) | `mutex_ecu_state` | task_control, task_failsafe, task_telemetry ↔ ecu_state |
+| Mutex (héritage prio) | `mutex_ecu_state` | task_rx, task_control, task_failsafe ↔ ecu_state        |
 | Sémaphore binaire     | `sem_failsafe`    | ISR GPIO → task_failsafe                                |
 
 > `configUSE_MUTEXES = 1` et `configUSE_RECURSIVE_MUTEXES = 1` requis dans
 > sdkconfig pour l'héritage de priorité sur les mutex.
+
+> **RTA formelle + FMEA (axe 1, actions 3–4)** : analyse structurelle
+> terminée — modélisation sporadique des 5 tâches, `B_ctrl = 0` (aucune tâche
+> moins prioritaire ne partage le mutex), `B_fs ≤ 4·C_cs` en double cœur,
+> cas `task_rx`/`task_control` à priorité égale, chemin failsafe, table FMEA
+> et recommandations R-1…R-8 — voir `rta_fmea.md` à la racine du repo.
+> Quantification numérique des WCET encore ⏳ en attente de la campagne de
+> mesure (axe 1, action 2).
 
 ---
 
@@ -198,7 +219,7 @@ TickType_t ecu_state_get_last_rx_tick(void);
 
 ---
 
-## Module pid.h / .c — à implémenter
+## Module pid.h / .c — ✅ implémenté
 
 Lib pure, pas d'état global. L'état PID est dans une struct passée par pointeur.
 
@@ -221,12 +242,20 @@ float pid_compute(pid_t *pid, float setpoint, float measure);
 
 **Anti-windup** : gel de l'intégrale si output saturé et erreur dans le même sens.
 
+**Entrées non finies** : si `setpoint - measure` n'est pas fini, ou si la somme
+P+I+D vaut NaN (débordements opposés), `pid_compute` retourne `out_min` **sans
+modifier l'état** (`integral`, `prev_err`). Sans ce garde, un seul NaN reçu sur
+le bus (CRC valide) figeait l'intégrale à NaN et toutes les sorties suivantes
+jusqu'au prochain `pid_reset()` (cf. `rta_fmea.md` F-05). Défense en profondeur :
+`task_control` rejette déjà les SETPOINT/SPEED non finis au dispatch (dernière
+valeur valide conservée).
+
 ---
 
-## Module failsafe.h / .c — à implémenter
+## Module failsafe.h / .c — ✅ implémenté
 
 ```c
-#define FAILSAFE_GPIO_PIN      GPIO_NUM_4   // à adapter
+#define FAILSAFE_GPIO_PIN      GPIO_NUM_4   // bouton vers GND, pull-up interne
 #define FAILSAFE_TIMEOUT_MS    2000
 #define FAILSAFE_RESPONSE_MS   5
 
@@ -238,8 +267,14 @@ void task_failsafe(void *pvParameters);
 - ISR GPIO → `xSemaphoreGiveFromISR(sem_failsafe)`
 - task_failsafe bloquée sur `xSemaphoreTake(sem_failsafe, pdMS_TO_TICKS(100))`
 - En parallèle, polling du last_rx_tick toutes les 100 ms
-- Au déclenchement : ecu_state → OFF, output=0, puis ALARM dans queue_tx
+- Au déclenchement : ecu_state → OFF, output=0, puis OUTPUT(0) et ALARM dans
+  queue_tx (timeout 0)
 - Reprise : task_control détecte MODE_SET → revalide le mode normalement
+- Interruption configurée en `GPIO_INTR_ANYEDGE`, sans anti-rebond (appui **et**
+  relâchement déclenchent) — cf. `rta_fmea.md` §6.2 et R-5
+- EF-05 (< 5 ms) tenue pour l'état interne (OFF, output=0) ; l'annonce
+  OUTPUT(0)/ALARM sur la ligne passe par task_tx (prio 3) et n'est pas bornée à
+  5 ms sous charge — cf. `rta_fmea.md` §6.1
 
 ---
 
@@ -273,9 +308,9 @@ projet perso plutôt qu'un produit réellement exposé à un adversaire actif.
   `task_rx_init`. Vérifié après `protocol_decode()` réussi, avant l'enqueue dans
   `queue_frames` — trame rejetée → `s_count_replay++`, comportement silencieux identique
   aux autres rejets protocolaires
-- Télémétrie : `rx_replay` ajouté à STATS (`TELEMETRY_STATS_COUNT` 5→6) — ordre du
-  payload : `rx_valid, rx_crc_error, rx_dropped, rx_replay, tx_output, uptime_s`
-  (4×uint32 → 5×uint32, cf. `task_telemetry.c`)
+- Télémétrie : `rx_replay` ajouté à STATS (`TELEMETRY_STATS_COUNT` 5→6 à cette étape,
+  7 après l'ajout de `tx_dropped` — cf. section « Télémétrie STATS » pour l'ordre final
+  du payload)
 
 **Limitation documentée** : pas d'état persistant entre redémarrages — après un reboot de
 l'ECU, `last_nonce` repart à 0, ce qui rouvre une fenêtre de rejeu jusqu'à la première
@@ -289,6 +324,44 @@ et action de stress dédiée (rejeu de la dernière trame SPEED acceptée, cf. `
 
 ---
 
+## Télémétrie STATS (0x83) — ordre du payload
+
+`TELEMETRY_STATS_COUNT = 7` × `uint32_t` little-endian = 28 octets, émis toutes les 1 s :
+
+| # | Champ          | Écrivain unique   | Signification                                           |
+|---|----------------|-------------------|---------------------------------------------------------|
+| 0 | `rx_valid`     | task_rx           | Trames décodées (CRC OK) et nonce accepté               |
+| 1 | `rx_crc_error` | task_rx           | Trames rejetées par `protocol_decode`                   |
+| 2 | `rx_dropped`   | task_rx           | LEN incohérent, trame partielle expirée, `queue_frames` pleine |
+| 3 | `rx_replay`    | task_rx           | Nonce rejeté (rejeu / duplication / hors ordre)         |
+| 4 | `tx_output`    | task_tx           | Trames OUTPUT effectivement écrites sur l'UART          |
+| 5 | `tx_dropped`   | task_control      | OUTPUT non émis faute de place dans `queue_tx`          |
+| 6 | `uptime_s`     | task_telemetry    | Secondes depuis le démarrage de task_telemetry          |
+
+`tx_dropped` a été ajouté lors de la RTA : `enqueue_output()` bloquait jusqu'à 10 ms
+sur `queue_tx` pleine, terme de blocage hors budget ±5 ms — désormais timeout 0 +
+compteur (cf. `rta_fmea.md` §4.3). Côté PC : `struct.unpack('<7I', payload[:28])`
+dans `test/ecu_tester.py`.
+
+---
+
+## Watchdog matériel (TWDT) — ✅ implémenté
+
+Complète le failsafe applicatif, qui dépend lui-même du bon fonctionnement des tâches.
+
+- `sdkconfig` : `CONFIG_ESP_TASK_WDT_PANIC=y`, `CONFIG_ESP_TASK_WDT_TIMEOUT_S=2`
+  (tâches IDLE des deux cœurs toujours surveillées)
+- Les 5 tâches s'abonnent (`esp_task_wdt_add(NULL)`) au démarrage et appellent
+  `esp_task_wdt_reset()` à chaque itération de leur boucle
+- `task_tx` : `xQueueReceive` borné à `TASK_TX_IDLE_WAKE_MS` (500 ms) au lieu de
+  `portMAX_DELAY`, pour nourrir le TWDT même sans trafic sortant
+- Expiration → panic → reboot → `ecu_state_init()` → mode OFF, output 0 (état sûr)
+- ⏳ Validation sur cible à faire (boucle infinie injectée volontairement)
+
+Détail des marges par tâche : `rta_fmea.md` §8.
+
+---
+
 ## Tests hébergés (host) — ✅ implémenté
 
 `protocol.c` et `pid.c` sont testés nativement (GCC, sans ESP-IDF/FreeRTOS), profitant de
@@ -298,11 +371,12 @@ leur statut de libs pures.
 test/unit/test_runner.h    → harness minimal, sans dépendance externe
 test/unit/test_protocol.c  → 90 tests (CRC, encode, decode, roundtrip, détection d'erreur,
                               nonce anti-rejeu)
-test/unit/test_pid.c       → 35 tests (init, reset, P/I/D, saturation, anti-windup)
+test/unit/test_pid.c       → 41 tests (init, reset, P/I/D, saturation, anti-windup,
+                              entrées NaN/Inf)
 test/unit/Makefile         → build natif, -fsanitize=address,undefined
 ```
 
-`make -C test/unit run` : build + exécution des deux suites. 125 tests, 0 échec, aucun
+`make -C test/unit run` : build + exécution des deux suites. 131 tests, 0 échec, aucun
 warning, aucun trigger ASan/UBSan.
 
 ---
@@ -347,7 +421,7 @@ couvre donc pas `protocol_nonce_check_and_update`, testée unitairement à la pl
 | Job              | Runner       | Contenu                                                        |
 |------------------|--------------|-----------------------------------------------------------------|
 | `firmware-build` | ubuntu-latest| `espressif/esp-idf-ci-action@v1` (image Docker ESP-IDF v5.3.5), `idf.py build` cible esp32 |
-| `hosted-tests`   | ubuntu-latest| `make -C test/unit run` — 95 tests, ASan/UBSan                 |
+| `hosted-tests`   | ubuntu-latest| `make -C test/unit run` — 131 tests, ASan/UBSan                 |
 | `fuzz-smoke`     | ubuntu-latest| build + corpus de départ + 30 s de fuzzing libFuzzer sur `protocol_decode`, artefacts uploadés si crash |
 
 `fuzz-smoke` n'est pas une campagne de fuzzing complète (voir section Fuzzing ci-dessus
@@ -388,6 +462,7 @@ temps de CI.
 - Pas de malloc / free dans les tâches (buffers statiques ou sur stack)
 - Pas de `vTaskDelay` dans task_control (utiliser `vTaskDelayUntil`)
 - Pas de variable globale non protégée partagée entre plusieurs tâches
-  (exception : compteurs `volatile` de task_rx, un seul écrivain)
+  (exception : compteurs `volatile` à écrivain unique — task_rx, task_tx,
+  task_control/`tx_dropped`)
 - Pas d'architecture monolithique (tout dans main ou dans une seule tâche)
 - Pas de `configUSE_MUTEXES = 0` — l'héritage de priorité doit être activé
