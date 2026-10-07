@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -98,7 +99,10 @@ void task_failsafe( void *pvParameters)
     const TickType_t polling_period = pdMS_TO_TICKS(100);
     const TickType_t timeout_ticks  = pdMS_TO_TICKS(FAILSAFE_TIMEOUT_MS);
 
+    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+
     for (;;) {
+        esp_task_wdt_reset();
         const BaseType_t gpio_event = xSemaphoreTake(s_sem_failsafe, polling_period);
 
         if (gpio_event == pdTRUE) {

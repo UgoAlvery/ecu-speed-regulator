@@ -1,5 +1,6 @@
 #include "task_control.h"
 
+#include <math.h>
 #include <string.h>
 
 #include "ecu_state.h"
@@ -12,14 +13,22 @@
 #include "freertos/task.h"
 
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 
 
 #define TAG               "CTRL"
 #define CONTROL_PERIOD_MS 100u
-#define TX_SEND_TIMEOUT   pdMS_TO_TICKS(10)
 
 static QueueHandle_t s_rx_queue = NULL;
 static QueueHandle_t s_tx_queue = NULL;
+
+/* task_control est le seul écrivain de ce compteur (même exception structurelle
+ * que les compteurs volatile de task_rx) — nombre d'OUTPUT non émis faute de
+ * place dans queue_tx. Trouvé et corrigé lors de la RTA formelle (cf.
+ * rta_fmea.md) : enqueue_output() bloquait jusqu'à 10 ms sur xQueueSend en cas
+ * de queue pleine, un terme de blocage non borné dans le budget de jitter
+ * ±5 ms de task_control. */
+static volatile uint32_t s_count_tx_dropped = 0;
 
 static void dispatch_pending_frames(void);
 static void dispatch_frame(const ecu_frame_t *frame);
@@ -34,6 +43,8 @@ void task_control_init(const QueueHandle_t rx_queue, const QueueHandle_t tx_queu
     s_rx_queue = rx_queue;
     s_tx_queue = tx_queue;
 }
+
+uint32_t task_control_get_count_tx_dropped(void) { return s_count_tx_dropped; }
 
 void task_control(void *pvParameters)
 {
@@ -51,9 +62,12 @@ void task_control(void *pvParameters)
 
     TickType_t last_wake = xTaskGetTickCount();
 
+    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+
     ESP_LOGI(TAG, "task_control démarrée, période %u ms", CONTROL_PERIOD_MS);
 
     for (;;) {
+        esp_task_wdt_reset();
         dispatch_pending_frames();
 
         const ecu_mode_t mode = ecu_state_get_mode();
@@ -102,6 +116,10 @@ static void dispatch_frame(const ecu_frame_t *frame)
         }
         float val;
         memcpy(&val, frame->payload, sizeof(float));
+        if (!isfinite(val)) {
+            ESP_LOGD(TAG, "SETPOINT : valeur non finie, ignorée");
+            break;
+        }
         ecu_state_set_setpoint(val);
         ESP_LOGD(TAG, "SETPOINT = %.2f", val);
         break;
@@ -114,6 +132,10 @@ static void dispatch_frame(const ecu_frame_t *frame)
         }
         float val;
         memcpy(&val, frame->payload, sizeof(float));
+        if (!isfinite(val)) {
+            ESP_LOGD(TAG, "SPEED : valeur non finie, ignorée");
+            break;
+        }
         ecu_state_set_speed(val);
         ESP_LOGD(TAG, "SPEED = %.2f", val);
         break;
@@ -150,7 +172,11 @@ static void run_pid_and_emit(pid_t *pid)
     ecu_state_set_output(output);
 
     if (!enqueue_output(output)) {
-        ESP_LOGW(TAG, "queue_tx pleine — OUTPUT non émis");
+        /* Pas de ESP_LOGW ici : la console partage UART0 avec le protocole,
+         * et ce chemin ne s'exécute qu'en surcharge — un log de ~40 octets à
+         * 115200 bauds coûterait jusqu'à ~3,5 ms dans le cycle (cf.
+         * rta_fmea.md §4.3). Le compteur tx_dropped remonte via STATS. */
+        s_count_tx_dropped++;
     }
 }
 
@@ -163,5 +189,9 @@ static bool enqueue_output(const float output)
     memcpy(msg.payload, &output, sizeof(float));
     msg.payload_len = (uint16_t)sizeof(float);
 
-    return xQueueSend(s_tx_queue, &msg, TX_SEND_TIMEOUT) == pdTRUE;
+    /* Timeout 0 (non bloquant), comme partout ailleurs dans l'architecture
+     * (xQueueSend task_rx/failsafe/telemetry, xQueueReceive task_control) :
+     * task_control ne doit jamais attendre sur une ressource externe pendant
+     * son cycle 100 ms — rejet silencieux + compteur, pas de blocage. */
+    return xQueueSend(s_tx_queue, &msg, 0) == pdTRUE;
 }

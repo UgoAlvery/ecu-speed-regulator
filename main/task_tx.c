@@ -13,12 +13,18 @@
 
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 
 static const char *TAG = "task_tx";
 
 #define TASK_TX_UART_NUM    UART_NUM_0
 
 #define TASK_TX_WRITE_TIMEOUT_MS  20
+
+/* Attente bornée sur queue_tx (au lieu de portMAX_DELAY) pour que task_tx
+ * puisse nourrir le TWDT même sans trafic sortant — doit rester nettement
+ * inférieur à CONFIG_ESP_TASK_WDT_TIMEOUT_S (2 s). */
+#define TASK_TX_IDLE_WAKE_MS      500
 
 static QueueHandle_t s_tx_queue = NULL;
 
@@ -52,11 +58,15 @@ void task_tx(void *pvParameters)
     uint8_t   frame_buf[PROTOCOL_MAX_FRAME_SIZE];
     tx_message_t msg;
 
+    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+
     ESP_LOGI(TAG, "tâche démarrée (prio %d)", uxTaskPriorityGet(NULL));
 
     for (;;) {
+        esp_task_wdt_reset();
 
-        if (xQueueReceive(s_tx_queue, &msg, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(s_tx_queue, &msg,
+                          pdMS_TO_TICKS(TASK_TX_IDLE_WAKE_MS)) != pdTRUE) {
             continue;
         }
 

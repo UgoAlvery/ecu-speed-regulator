@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "driver/uart.h"
+#include "esp_task_wdt.h"
 
 #define PARSER_TIMEOUT_MS 50
 
@@ -135,7 +136,12 @@ void task_rx(void *pvParameters) {
     uint8_t byte;
     ecu_frame_t frame;
 
+    /* Réveil garanti au moins toutes les PARSER_TIMEOUT_MS (50 ms), même sans
+     * trafic : le reset TWDT à chaque itération ne dépend pas du bus. */
+    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+
     while (1) {
+        esp_task_wdt_reset();
         const int received = uart_read_bytes(UART_NUM, &byte, 1,
                                        pdMS_TO_TICKS(PARSER_TIMEOUT_MS));
         if (received == 1) {

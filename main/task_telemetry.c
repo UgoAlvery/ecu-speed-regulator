@@ -12,10 +12,13 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
+#include "esp_task_wdt.h"
+
 #include "protocol.h"
 #include "ecu_state.h"
 #include "task_rx.h"
 #include "task_tx.h"
+#include "task_control.h"
 
 
 static QueueHandle_t s_tx_queue = NULL;
@@ -36,9 +39,12 @@ void task_telemetry(void *pvParameters)
     TickType_t last_wake = xTaskGetTickCount();
     uint32_t   uptime_s  = 0U;
 
+    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+
     for (;;)
     {
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(TELEMETRY_PERIOD_MS));
+        esp_task_wdt_reset();
         uptime_s++;
 
         uint32_t rx_valid     = task_rx_get_count_valid();
@@ -46,6 +52,7 @@ void task_telemetry(void *pvParameters)
         uint32_t rx_dropped   = task_rx_get_count_dropped();
         uint32_t rx_replay    = task_rx_get_count_replay();
         uint32_t tx_output    = task_tx_get_count_output();
+        uint32_t tx_dropped   = task_control_get_count_tx_dropped();
 
         uint8_t *p = s_payload;
         memcpy(p, &rx_valid,     sizeof(uint32_t)); p += sizeof(uint32_t);
@@ -53,6 +60,7 @@ void task_telemetry(void *pvParameters)
         memcpy(p, &rx_dropped,   sizeof(uint32_t)); p += sizeof(uint32_t);
         memcpy(p, &rx_replay,    sizeof(uint32_t)); p += sizeof(uint32_t);
         memcpy(p, &tx_output,    sizeof(uint32_t)); p += sizeof(uint32_t);
+        memcpy(p, &tx_dropped,   sizeof(uint32_t)); p += sizeof(uint32_t);
         memcpy(p, &uptime_s,     sizeof(uint32_t));
 
         const uint16_t payload_len =

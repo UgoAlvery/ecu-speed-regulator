@@ -141,13 +141,15 @@ class ECUTester:
 
                             elif msg_type == MSG_STATS:
                                 self.stats_count += 1
-                                if len(payload) >= 24:
-                                    rx_valid, rx_crc_err, rx_dropped, rx_replay, tx_output, uptime_s = \
-                                        struct.unpack('<6I', payload[:24])
+                                if len(payload) >= 28:
+                                    rx_valid, rx_crc_err, rx_dropped, rx_replay, \
+                                        tx_output, tx_dropped, uptime_s = \
+                                        struct.unpack('<7I', payload[:28])
                                     self.log(f"[TELEMETRIE] ({self.stats_count}s) "
                                              f"valid={rx_valid} crc_err={rx_crc_err} "
                                              f"dropped={rx_dropped} replay={rx_replay} "
-                                             f"tx_output={tx_output} uptime={uptime_s}s")
+                                             f"tx_output={tx_output} tx_dropped={tx_dropped} "
+                                             f"uptime={uptime_s}s")
                                 else:
                                     self.log(f"[TELEMETRIE] Reçue ({self.stats_count}s)")
 
