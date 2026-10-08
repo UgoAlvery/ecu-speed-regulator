@@ -45,10 +45,10 @@ dédiée serait du overhead sans bénéfice.
 | `task_tx`        | 3        | event-driven   | 4096           | `xQueueReceive` borné 500 ms (TWDT)         |
 | `task_telemetry` | 2        | 1 s            | 2048           | `vTaskDelayUntil`                           |
 
-> Sous ESP-IDF, la profondeur de pile de `xTaskCreate` est en **octets**, pas
-> en mots (contrairement au FreeRTOS vanilla) : les macros `STACK_*_WORDS` de
-> `main.c` sont mal nommées, les valeurs ci-dessus sont celles réellement
-> allouées. Marges non mesurées — cf. `rta_fmea.md` R-8.
+> Sous ESP-IDF, la profondeur de pile de `xTaskCreate` est en **octets**
+> (contrairement au FreeRTOS vanilla) : macros `STACK_*_BYTES` de `main.c`,
+> valeurs ci-dessus = tailles réellement allouées. Marges non mesurées — cf.
+> `rta_fmea.md` R-8.
 
 > `task_rx` et `task_control` ont la même priorité (4). En régime nominal
 > (task_rx bloquée sur UART l'essentiel du temps) elles ne se préemptent

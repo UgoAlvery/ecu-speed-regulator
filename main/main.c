@@ -25,11 +25,13 @@
 #define TASK_TX_PRIORITY         3u
 #define TASK_TELEMETRY_PRIORITY  2u
 
-#define STACK_FAILSAFE_WORDS    2048u
-#define STACK_RX_WORDS          4096u
-#define STACK_CONTROL_WORDS     4096u
-#define STACK_TX_WORDS          4096u
-#define STACK_TELEMETRY_WORDS   2048u
+/* ESP-IDF : la profondeur de pile passée à xTaskCreate est en OCTETS (et non
+ * en mots comme dans le FreeRTOS vanilla). */
+#define STACK_FAILSAFE_BYTES    2048u
+#define STACK_RX_BYTES          4096u
+#define STACK_CONTROL_BYTES     4096u
+#define STACK_TX_BYTES          4096u
+#define STACK_TELEMETRY_BYTES   2048u
 
 static const char *TAG = "main";
 
@@ -58,7 +60,7 @@ void app_main(void)
 
     BaseType_t ret = xTaskCreate(task_failsafe,
                       "task_failsafe",
-                      STACK_FAILSAFE_WORDS,
+                      STACK_FAILSAFE_BYTES,
                       NULL,
                       TASK_FAILSAFE_PRIORITY,
                       NULL);
@@ -66,7 +68,7 @@ void app_main(void)
 
     ret = xTaskCreate(task_rx,
                       "task_rx",
-                      STACK_RX_WORDS,
+                      STACK_RX_BYTES,
                       NULL,
                       TASK_RX_PRIORITY,
                       NULL);
@@ -74,7 +76,7 @@ void app_main(void)
 
     ret = xTaskCreate(task_control,
                       "task_control",
-                      STACK_CONTROL_WORDS,
+                      STACK_CONTROL_BYTES,
                       NULL,
                       TASK_CONTROL_PRIORITY,
                       NULL);
@@ -82,7 +84,7 @@ void app_main(void)
 
     ret = xTaskCreate(task_tx,
                       "task_tx",
-                      STACK_TX_WORDS,
+                      STACK_TX_BYTES,
                       NULL,
                       TASK_TX_PRIORITY,
                       NULL);
@@ -90,7 +92,7 @@ void app_main(void)
 
     ret = xTaskCreate(task_telemetry,
                       "task_telemetry",
-                      STACK_TELEMETRY_WORDS,
+                      STACK_TELEMETRY_BYTES,
                       NULL,
                       TASK_TELEMETRY_PRIORITY,
                       NULL);

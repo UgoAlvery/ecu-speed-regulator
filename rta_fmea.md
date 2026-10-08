@@ -388,7 +388,7 @@ de bruit ou de rejeux ne maintient pas l'ECU en vie. ✅
 | R-1 | Rendre `task_control` **strictement** plus prioritaire que `task_rx` (par exemple rx et tx à 3). Le buffer RX de 2048 o absorbe 178 ms de flood alors que `C_ctrl` ≪ 1 ms : aucune perte. Le cas du §5 disparaît. | F-18 | Trivial, mais à faire **après** la mesure pour la documenter avant/après |
 | R-3 | Déplacer le protocole sur UART2 (GPIO16/17, déjà prévu dans `brochage_materiel_GPIO.md` ; `uart_set_pin` est actuellement en `UART_PIN_NO_CHANGE` sur UART0) et laisser UART0 à la console. Dans tous les cas, plus aucun log ≥ INFO déclenchable par une trame reçue dans `task_control` (« payload trop court » → `ESP_LOGD` + compteur) | F-14, §4.3 | Faible (+ adaptateur USB-TTL) |
 | R-9 | Émettre un OUTPUT(0) depuis `task_control` à toute transition hors AUTO (F-19). Comme task_control est alors le dernier à écrire sur le bus pour ce cycle, la course F-20 se referme aussi. Changement de comportement : à décider, non implémenté | F-19, F-20 | Faible |
-| R-8 | Mesurer `uxTaskGetStackHighWaterMark` pour chaque tâche (mode diagnostic, axe 5) et dimensionner les piles. NB : sous ESP-IDF, `xTaskCreate` prend la pile **en octets**, pas en mots. Les macros `STACK_*_WORDS` de `main.c` sont donc mal nommées. | F-10 | Faible |
+| R-8 | Mesurer `uxTaskGetStackHighWaterMark` pour chaque tâche (mode diagnostic, axe 5) et dimensionner les piles. NB : sous ESP-IDF, `xTaskCreate` prend la pile **en octets** : macros renommées `STACK_*_BYTES` (D5). | F-10 | Faible |
 
 ---
 
