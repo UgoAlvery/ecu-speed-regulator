@@ -357,38 +357,39 @@ de bruit ou de rejeux ne maintient pas l'ECU en vie. ✅
 | ID | Mode de défaillance | Effet | Détection | Mitigation en place | G | O | D | C | Risque résiduel / action |
 |---|---|---|---|---|---|---|---|---|---|
 | F-01 | Silence UART (câble, PC planté) | Dernière consigne maintenue | `task_failsafe`, timeout 2 s | Passage en OFF, OUTPUT(0), ALARM | 3 | 3 | 1 | 9 | 2,1 s au plus sur la dernière consigne. Acceptable pour le TP. |
-| F-02 | Flood UART | `queue_frames` saturée (16), drop de la trame **la plus récente** | `rx_dropped` (STATS) | Parser non bloquant, buffer de 2048 o | 3 | 2 | 2 | 12 | **Un MODE_SET(OFF) peut être perdu sous flood** → R-6 |
+| F-02 | Flood UART | `queue_frames` saturée (16), drop de la trame **la plus récente** | `rx_dropped` (STATS) | Parser non bloquant, buffer de 2048 o | 3 | 2 | 2 | 12 | ✅ **Traité** (`eb9c6d1`, R-6) pour MODE_SET : `queue_mode` écrasable, jamais perdu. Reste : SETPOINT/SPEED peuvent toujours être perdus sous flood (dernière valeur valide conservée, compté dans `rx_dropped`) |
 | F-03 | Corruption de trame (bruit) | Valeur erronée appliquée | CRC-16/CCITT | Rejet silencieux, `rx_crc_error` | 4 | 2 | 1 | 8 | Erreurs ≤ 3 bits et rafales ≤ 16 bits toujours détectées. Probabilité résiduelle d'environ 2⁻¹⁶ pour un motif aléatoire au-delà. |
 | F-04 | Rejeu d'une trame capturée | Commande périmée réappliquée | Nonce anti-rejeu | Rejet, `rx_replay` | 3 | 1 | 1 | 3 | Fenêtre ouverte après reboot (limitation documentée) |
-| F-05 | Valeur **non finie** (NaN/Inf) avec un CRC valide | **Avant correctif** : intégrale du PID figée à NaN, OUTPUT = NaN jusqu'au prochain changement de mode | — | ✅ **Corrigé** : rejet dans `dispatch_frame` + garde dans `pid_compute` (repli sur `out_min`) + 5 tests unitaires | 4 | 1 | 1 | 4 | Défense en profondeur sur deux niveaux |
-| F-06 | Valeur finie mais aberrante (setpoint = 10⁶) | PID saturé à 255 : pleine puissance | Aucune | Saturation de la sortie | 4 | 1 | 4 | 16 | **Pas de contrôle de plausibilité** → R-7 |
+| F-05 | Valeur **non finie** (NaN/Inf) avec un CRC valide | **Avant correctif** : intégrale du PID figée à NaN, OUTPUT = NaN jusqu'au prochain changement de mode | — | ✅ **Corrigé** (`8a54c7c`, puis `1ca0e2d`) : rejet par `protocol_parse_f32` + garde dans `pid_compute` (repli sur `out_min`) + tests unitaires | 4 | 1 | 1 | 4 | Défense en profondeur sur deux niveaux |
+| F-06 | Valeur finie mais aberrante (setpoint = 10⁶) | PID saturé à 255 : pleine puissance | Aucune | Saturation de la sortie | 4 | 1 | 4 | 16 | **Ouvert** : pas de contrôle de plausibilité → R-7 |
 | F-07 | `queue_tx` pleine | OUTPUT non émis | `tx_dropped` (STATS) | Envoi non bloquant | 2 | 2 | 1 | 4 | — |
-| F-08 | `queue_tx` pleine **au moment du failsafe** | OUTPUT(0) et ALARM perdus : arrêt non annoncé | **Aucune** (pas de compteur) | L'état interne passe quand même à OFF | 3 | 1 | 4 | 12 | → R-4 |
-| F-09 | Tâche bloquée (boucle infinie, attente sans fin) | Régulation ou supervision figée | ✅ **TWDT** (nouveau) : les 5 tâches sont abonnées, timeout de 2 s | Panic → reboot → mode OFF au boot | 4 | 1 | 1 | 4 | ~2 s + temps de boot sans commande. L'état au boot est sûr. |
-| F-10 | Débordement de pile | Corruption mémoire, comportement indéfini | Canary FreeRTOS (`CHECK_STACKOVERFLOW_CANARY`) | Panic → reboot | 4 | 1 | 2 | 8 | Marges non mesurées → R-8 |
+| F-08 | `queue_tx` pleine **au moment du failsafe** | OUTPUT(0) et ALARM perdus : arrêt non annoncé | **Aucune** (pas de compteur) | L'état interne passe quand même à OFF | 3 | 1 | 4 | 12 | **Ouvert** → R-4 (volet `SendToFront` + compteur non implémenté) |
+| F-09 | Tâche bloquée (boucle infinie, attente sans fin) | Régulation ou supervision figée | ✅ **TWDT** (`0ce7e7e`) : les 5 tâches sont abonnées, timeout de 2 s | Panic → reboot → mode OFF au boot | 4 | 1 | 1 | 4 | ~2 s + temps de boot sans commande. L'état au boot est sûr. |
+| F-10 | Débordement de pile | Corruption mémoire, comportement indéfini | Canary FreeRTOS (`CHECK_STACKOVERFLOW_CANARY`) | Panic → reboot | 4 | 1 | 2 | 8 | **Ouvert** : marges non mesurées → R-8 (⏳ sur carte) |
 | F-11 | Deadlock du mutex | Tâches figées | TWDT | Impossible structurellement (§4.2) | 4 | 1 | 1 | 4 | — |
 | F-12 | Inversion de priorité | Failsafe retardé | — | Héritage de priorité, `B_fs ≤ 5·C_cs` | 3 | 1 | 2 | 6 | — |
-| F-13 | Bouton failsafe : fil coupé, contact défectueux | Failsafe GPIO **indisponible** (pull-up → ligne haute en permanence) | **Aucune** (défaut latent) | Le timeout UART reste actif | 4 | 2 | 4 | **32** | **Plus forte criticité**. Contact normalement fermé (NC) + front montant = coupure → R-5 |
-| F-14 | Logs `ESP_LOG` sur UART0 | ASCII injecté dans le flux protocole, temps de blocage dans le cycle | Parser PC (resynchronisation sur 0xAA + CRC) | Pas de log sur le chemin de surcharge (corrigé) | 2 | 3 | 2 | 12 | Protocole à déplacer sur UART2 (GPIO16/17) → R-3 |
-| F-15 | Rebonds du bouton failsafe | Rafale de failsafes, `queue_tx` saturée | — | Sémaphore binaire (fusion des Give) | 1 | 3 | 2 | 6 | → R-5 |
+| F-13 | Bouton failsafe : fil coupé, contact défectueux | Failsafe GPIO **indisponible** (pull-up → ligne haute en permanence) | **Aucune** (défaut latent) | Le timeout UART reste actif | 4 | 2 | 4 | **32** | ✅ **Traité** (`233f002`, R-5) : contact NC, un fil coupé déclenche le failsafe. Niveau relu au boot et à chaque poll. Nouvelle cotation D = 1 → C = 8. ⏳ Validation sur carte |
+| F-14 | Logs `ESP_LOG` sur UART0 | ASCII injecté dans le flux protocole, temps de blocage dans le cycle | Parser PC (resynchronisation sur 0xAA + CRC) | Protocole sur UART2, plus aucun log dans le cycle de `task_control` | 2 | 3 | 2 | 12 | ✅ **Traité** (`1ca0e2d`, R-3) : console et protocole séparés, rejets comptés (`rx_invalid`) |
+| F-15 | Rebonds du bouton failsafe | Rafale de failsafes, `queue_tx` saturée | — | Sémaphore binaire (fusion des Give) | 1 | 3 | 2 | 6 | ✅ **Traité** (`233f002`) : latch `failsafe_line.c`, une ALARM par entrée en failsafe, déverrouillage après 2 polls fermés |
 | F-16 | Coupure d'alimentation de l'ECU | Plus aucune commande émise | Côté superviseur ou véhicule seulement | Aucune côté ECU | 4 | 2 | 3 | 24 | **Axe 4** : l'ECU véhicule doit avoir son propre timeout CAN → moteur à 0 |
 | F-17 | Dépassement de compteur | `uint32` : ~38 jours à 1 280 trames/s. Tick 32 bits à 100 Hz : 497 jours | — | Soustraction modulaire `now - last_tick` correcte | 1 | 1 | 2 | 2 | — |
-| F-18 | Gigue > ±5 ms sous flood (§5) | EF-01 violée | ⏳ mesure | — | 2 | 2 | 3 | 12 | → R-1 |
+| F-18 | Gigue > ±5 ms sous flood (§5) | EF-01 violée | ⏳ mesure | — | 2 | 2 | 3 | 12 | **Ouvert** : ⏳ mesure de `C_rx` ; R-1 (changement de priorité) hors périmètre de la session D1–D5 |
 | F-19 | `MODE_SET(OFF)` hors failsafe (constaté en rédigeant D4) | Commande interne à 0, mais **aucune trame OUTPUT = 0 émise** : l'actionneur garde la dernière commande non nulle reçue | Aucune côté ECU | Aucune | 4 | 2 | 4 | **32** | **Ouvert** → R-9 |
 | F-20 | Course failsafe / `task_control` (constaté en rédigeant D4) | task_control, en plein cycle AUTO, poste son OUTPUT(pid) **après** l'OUTPUT(0) du failsafe (double cœur, ou failsafe qui préempte entre `get_mode` et `enqueue_output`). La dernière commande sur le bus est alors non nulle | Aucune | État interne OFF : le cycle suivant n'émet plus rien | 4 | 1 | 4 | 16 | **Ouvert** → R-9 |
 
-### Recommandations (par criticité décroissante)
+### Recommandations
 
-| Réf. | Recommandation | Couvre | Effort |
+| Réf. | Recommandation | Couvre | Statut |
 |---|---|---|---|
-| R-5 | Bouton failsafe en **contact NC** (circuit ouvert = failsafe), `GPIO_INTR_POSEDGE`, désactiver l'interruption dans l'ISR (`gpio_intr_disable`) puis la réactiver à la reprise (MODE_SET) | F-13, F-15 | Faible (+ re-câblage) |
-| R-7 | Bornes de plausibilité sur SETPOINT et SPEED (par exemple `[0, V_MAX]`) dans `dispatch_frame`, avec un compteur de rejets | F-06 | Faible |
-| R-6 | Traiter MODE_SET(OFF) comme une commande de sûreté : `task_rx` l'applique directement (`ecu_state_set_mode`) ou l'insère par `xQueueSendToFront`, plutôt que d'être perdu en cas de queue pleine | F-02 | Faible |
-| R-4 | Au failsafe, `xQueueSendToFront` pour OUTPUT(0) et ALARM + compteur `failsafe_tx_dropped`. Redéfinir EF-05 en deux temps : état interne < 5 ms, annonce sur le bus < X ms (mesuré) | F-08, §6.1 | Faible |
-| R-1 | Rendre `task_control` **strictement** plus prioritaire que `task_rx` (par exemple rx et tx à 3). Le buffer RX de 2048 o absorbe 178 ms de flood alors que `C_ctrl` ≪ 1 ms : aucune perte. Le cas du §5 disparaît. | F-18 | Trivial, mais à faire **après** la mesure pour la documenter avant/après |
-| R-3 | Déplacer le protocole sur UART2 (GPIO16/17, déjà prévu dans `brochage_materiel_GPIO.md` ; `uart_set_pin` est actuellement en `UART_PIN_NO_CHANGE` sur UART0) et laisser UART0 à la console. Dans tous les cas, plus aucun log ≥ INFO déclenchable par une trame reçue dans `task_control` (« payload trop court » → `ESP_LOGD` + compteur) | F-14, §4.3 | Faible (+ adaptateur USB-TTL) |
-| R-9 | Émettre un OUTPUT(0) depuis `task_control` à toute transition hors AUTO (F-19). Comme task_control est alors le dernier à écrire sur le bus pour ce cycle, la course F-20 se referme aussi. Changement de comportement : à décider, non implémenté | F-19, F-20 | Faible |
-| R-8 | Mesurer `uxTaskGetStackHighWaterMark` pour chaque tâche (mode diagnostic, axe 5) et dimensionner les piles. NB : sous ESP-IDF, `xTaskCreate` prend la pile **en octets** : macros renommées `STACK_*_BYTES` (D5). | F-10 | Faible |
+| R-1 | Rendre `task_control` **strictement** plus prioritaire que `task_rx` (par exemple rx et tx à 3). Le buffer RX de 2048 o absorbe 178 ms de flood alors que `C_ctrl` ≪ 1 ms : aucune perte. Le cas du §5 disparaît. À faire **après** la mesure, pour documenter l'avant/après. | F-18 | **Ouvert** : décision de priorité réservée, ⏳ mesure de `C_rx` |
+| R-2 | — (numéro non attribué) | — | — |
+| R-3 | Protocole sur UART2 (GPIO16/17), UART0 réservé à la console. Plus aucun log déclenchable par une trame reçue dans le cycle de `task_control` : compteurs à la place. | F-14, §4.3 | ✅ **Traité** — `1ca0e2d` |
+| R-4 | (a) Redéfinir EF-05 en deux temps : état interne < 5 ms, annonce sur le bus bornée séparément. (b) Au failsafe, `xQueueSendToFront` pour OUTPUT(0) et ALARM + compteur `failsafe_tx_dropped`. | F-08, §6.1 | **Partiel** : (a) ✅ `4cd8f02` (borne de 41 ms de temps de ligne, §6.1) ; (b) ouvert |
+| R-5 | Ligne failsafe en **contact NC**, `GPIO_INTR_POSEDGE`, latch + anti-rebond logiciel, niveau relu au boot et au polling, verrou AUTO tant que la ligne est ouverte, LED GPIO25. (La désactivation de l'interruption dans l'ISR, envisagée au départ, est remplacée par le latch : un réveil sur rebond coûte quelques µs sans effet.) | F-13, F-15 | ✅ **Traité** — `233f002` (⏳ validation sur carte) |
+| R-6 | MODE_SET hors de `queue_frames` : `queue_mode` de longueur 1 écrite par `xQueueOverwrite`, lue en début de cycle | F-02 | ✅ **Traité** — `eb9c6d1` |
+| R-7 | Bornes de plausibilité sur SETPOINT et SPEED (par exemple `[0, V_MAX]`) avec un compteur de rejets. Le domaine « fini » est déjà imposé par `protocol_parse_f32` ; il manque des bornes physiques, qui dépendent de l'actionneur réel (axe 4). | F-06 | **Ouvert** : hors périmètre D1–D5 |
+| R-8 | (a) Nommage `STACK_*_BYTES`. (b) Mesurer `uxTaskGetStackHighWaterMark` pour chaque tâche (mode diagnostic, axe 5) et dimensionner les piles. | F-10 | **Partiel** : (a) ✅ `cc7d9a6` ; (b) ⏳ sur carte |
+| R-9 | Émettre un OUTPUT(0) depuis `task_control` à toute transition hors AUTO. Comme task_control devient alors le dernier à écrire sur le bus pour ce cycle, la course F-20 se referme aussi. | F-19, F-20 | **Ouvert** : changement de comportement à décider |
 
 ---
 
@@ -436,9 +437,24 @@ phase stress) :
    cycles, min/max/écart-type.
 2. `C_rx` par octet sous flood, puis vérifier si rx est prête en continu.
 3. Latence GPIO4 → GPIO23 (état interne) et GPIO4 → fin de trame OUTPUT(0)
-   sur la ligne TX (annonce sur le bus).
-4. Cycle avec MODE_SET : impact des `ESP_LOGI` (§4.3, point 3).
+   puis ALARM sur GPIO17 (annonce sur le bus, à comparer à la borne de 41 ms
+   du §6.1).
+4. ~~Cycle avec MODE_SET : impact des `ESP_LOGI`~~ — sans objet depuis D1
+   (plus aucun log dans le cycle). À la place : latence réception MODE_SET →
+   changement d'OUTPUT (≤ 100 ms attendus, §4.4).
 5. Comparaison avant/après R-1.
+
+Validations fonctionnelles sur carte (hors mesure de temps) :
+
+6. Contact NC : retrait du jumper en marche (une seule ALARM, LED allumée,
+   `MODE_SET(AUTO)` refusé et `mode_refused` qui monte), remise du jumper
+   (déverrouillage, puis AUTO accepté), **boot avec le jumper déjà retiré**
+   (ALARM « line open at boot »).
+7. TWDT : boucle infinie injectée volontairement dans une tâche → reboot
+   en ~2 s, redémarrage en OFF.
+8. Stress test complet `ecu_tester.py` via l'adaptateur USB-TTL (UART2),
+   avec MODE_SET(OFF) envoyé au milieu du flood : il doit être appliqué
+   (§4.4).
 
 En complément : SEGGER SystemView via `esp_apptrace` pour l'historique
 d'ordonnancement (préemptions, migrations entre cœurs).

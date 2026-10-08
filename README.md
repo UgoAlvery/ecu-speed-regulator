@@ -252,7 +252,7 @@ ESP-IDF déclenche un reboot au bout de 2 s ; l'ECU redémarre en mode `OFF`, co
 
 [`rta_fmea.md`](rta_fmea.md) : modèle de tâches sporadiques, équations de RTA, bornes de
 blocage sur le mutex, cas `task_rx`/`task_control` à priorité égale, décomposition du
-chemin failsafe, AMDEC/FMEA (18 modes de défaillance) et recommandations. Les WCET sont
+chemin failsafe, AMDEC/FMEA (20 modes de défaillance) et recommandations. Les WCET sont
 encore symboliques en attente de la campagne de mesure sur cible.
 
 ---

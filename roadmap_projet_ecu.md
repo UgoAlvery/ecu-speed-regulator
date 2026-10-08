@@ -36,9 +36,10 @@ un profil embarqué industriel/sûreté.
 
 ### Actions concrètes
 
-1. **Test failsafe GPIO manquant** — encore en attente (jumper wire manquant lors de la
-   dernière session hardware). À faire en premier, c'est la seule exigence fonctionnelle
-   du TP pas encore validée empiriquement.
+1. **Test failsafe GPIO manquant** — encore en attente sur carte. Le failsafe est désormais
+   en **contact normalement fermé** (jumper permanent GPIO4 → GND, `233f002`) : le test
+   consiste à retirer le jumper en marche, puis à démarrer avec le jumper déjà retiré. C'est
+   la seule exigence fonctionnelle du TP pas encore validée empiriquement.
 2. **WCET mesuré** (pas estimé) :
    - Instrumentation GPIO toggle en entrée/sortie de `task_control`, capture à
      l'analyseur logique, sous flood UART actif.
@@ -52,12 +53,23 @@ un profil embarqué industriel/sûreté.
      le chiffrer, pas juste affirmer qu'il est activé.
    - Vérifier et documenter formellement le cas `task_rx` / `task_control` à priorité
      égale (config `configUSE_TIME_SLICING`) — actuellement une hypothèse non prouvée.
-4. ✅ **FMEA/AMDEC** (`rta_fmea.md` §7, recommandations R-1…R-8 à implémenter) — table modes de défaillance → effet → détection → mitigation →
+4. ✅ **FMEA/AMDEC** (`rta_fmea.md` §7, 20 modes, recommandations R-1…R-9 avec statut :
+   R-3, R-5, R-6 traitées ; R-4, R-8 partielles ; R-1, R-7, R-9 ouvertes) — table modes de défaillance → effet → détection → mitigation →
    risque résiduel (voir squelette déjà esquissé : silence UART, flood, collision CRC,
    stack overflow, deadlock mutex, coupure alimentation, GPIO non testé).
 5. ✅ **Watchdog matériel** (Task Watchdog Timer ESP-IDF, validation sur cible ⏳) en complément du failsafe
    applicatif — actuellement le failsafe dépend du bon fonctionnement des tâches
    elles-mêmes ; un TWDT couvre le cas où une tâche est totalement bloquée.
+
+6. ✅ **Durcissement issu de la FMEA** (session D1–D5) :
+   - protocole sur UART2, console seule sur UART0, compteurs au lieu de logs (`1ca0e2d`) ;
+   - failsafe GPIO en contact NC avec latch, contrôle de niveau, verrou AUTO et LED (`233f002`) ;
+   - MODE_SET par `queue_mode` écrasable, jamais perdu sous flood (`eb9c6d1`) ;
+   - EF-05 scindée : état interne < 5 ms, émission bornée à 41 ms de temps de ligne (`4cd8f02`) ;
+   - tailles de pile `STACK_*_BYTES` (`cc7d9a6`).
+
+   Reste à décider : R-9 (OUTPUT(0) à la sortie d'AUTO, F-19/F-20, criticité 32), R-1
+   (priorités), R-7 (bornes physiques, avec l'axe 4).
 
 **Livrable de fin d'axe** : document d'analyse temps réel + sûreté (peut être une section
 dédiée du rapport, ou un document séparé type "safety case").
@@ -158,7 +170,7 @@ documentée (deux ECU, bus CAN réel).
 
 | Phase | Contenu | Sortie |
 |-------|---------|--------|
-| **Phase 0** | Test failsafe GPIO manquant | Exigence TP 100 % validée |
+| **Phase 0** | Test failsafe GPIO manquant (contact NC : retrait du jumper + boot jumper retiré) | Exigence TP 100 % validée |
 | **Phase 1** | WCET mesuré + RTA formelle + FMEA + watchdog HW | Document sûreté / temps réel |
 | **Phase 2** | CRC16 + authentification légère | `protocol.c` v2 |
 | **Phase 3** | Tests unitaires hébergés + fuzzing + CI | Pipeline de validation automatique |
