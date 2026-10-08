@@ -45,8 +45,9 @@ static volatile uint32_t s_count_mode_refused = 0;
 static void apply_pending_mode(void);
 static void dispatch_pending_frames(void);
 static void dispatch_frame(const ecu_frame_t *frame);
-static void run_pid_and_emit(pid_t *pid);
-static bool enqueue_output(float output);
+static float compute_requested_output(pid_t *pid, ecu_mode_t mode);
+static void  emit_output(float requested);
+static bool  enqueue_output(float output);
 
 
 void task_control_init(const QueueHandle_t rx_queue, const QueueHandle_t mode_queue,
@@ -91,16 +92,15 @@ void task_control(void *pvParameters)
 
         const ecu_mode_t mode = ecu_state_get_mode();
         if (mode != prev_mode) {
-            if (mode != ECU_MODE_AUTO) {
-                ecu_state_set_output(0.0f);
-            }
             pid_reset(&pid);
             prev_mode = mode;
         }
 
-        if (mode == ECU_MODE_AUTO) {
-            run_pid_and_emit(&pid);
-        }
+        /* OUTPUT émis à CHAQUE cycle, dans tous les modes (0 hors AUTO) :
+         * task_control est l'unique émetteur d'OUTPUT (R-9). Une trame perdue
+         * est remplacée en ≤ 100 ms, et l'OUTPUT sert de signal de vie à
+         * l'actionneur (coupure si silence > 300 ms côté ECU moteur). */
+        emit_output(compute_requested_output(&pid, mode));
 
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(CONTROL_PERIOD_MS));
     }
@@ -165,19 +165,29 @@ static void dispatch_frame(const ecu_frame_t *frame)
 }
 
 
-static void run_pid_and_emit(pid_t *pid)
+static float compute_requested_output(pid_t *pid, const ecu_mode_t mode)
 {
+    if (mode != ECU_MODE_AUTO) {
+        return 0.0f;
+    }
     const float setpoint = ecu_state_get_setpoint();
     const float speed    = ecu_state_get_speed();
-    const float output   = pid_compute(pid, setpoint, speed);
+    return pid_compute(pid, setpoint, speed);
+}
 
-    ecu_state_set_output(output);
+
+static void emit_output(const float requested)
+{
+    /* Relecture du mode juste avant la mise en queue, atomique avec
+     * l'écriture de la commande : si task_failsafe est passé entre le calcul
+     * du PID et ici, la valeur retenue est 0. Seul reste possible un failsafe
+     * APRÈS ce point : au plus une trame non nulle déjà validée part après
+     * l'ALARM, remplacée par OUTPUT(0) au cycle suivant (rta_fmea.md F-20). */
+    const float output = ecu_state_commit_output(requested);
 
     if (!enqueue_output(output)) {
-        /* Pas de ESP_LOGW ici : la console partage UART0 avec le protocole,
-         * et ce chemin ne s'exécute qu'en surcharge — un log de ~40 octets à
-         * 115200 bauds coûterait jusqu'à ~3,5 ms dans le cycle (cf.
-         * rta_fmea.md §4.3). Le compteur tx_dropped remonte via STATS. */
+        /* Pas de log : ce chemin ne s'exécute qu'en surcharge (rta_fmea.md
+         * §4.3). Le compteur tx_dropped remonte via STATS. */
         s_count_tx_dropped++;
     }
 }

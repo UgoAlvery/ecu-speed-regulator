@@ -27,10 +27,8 @@ typedef struct {
 
 void ecu_state_init(void);
 
-void ecu_state_set_mode(ecu_mode_t mode);
 void ecu_state_set_setpoint(float setpoint);
 void ecu_state_set_speed(float speed);
-void ecu_state_set_output(float output);
 void ecu_state_set_last_rx_tick(TickType_t tick);
 void ecu_state_set_failsafe_locked(bool locked);
 
@@ -42,6 +40,18 @@ void ecu_state_set_failsafe_locked(bool locked);
  * task_failsafe verrouiller entre les deux et l'AUTO passerait quand même.
  * Retourne false si la demande est refusée (état inchangé). */
 bool ecu_state_try_set_mode(ecu_mode_t mode);
+
+/* commit_output : relit le mode et fixe la commande en une opération.
+ * Mode AUTO → output = requested ; tout autre mode → output = 0. Retourne la
+ * valeur retenue, seule valeur que task_control a le droit d'émettre.
+ * Appelée juste avant la mise en queue de l'OUTPUT : un failsafe survenu
+ * pendant le calcul du PID est vu ici et force 0. */
+float ecu_state_commit_output(float requested);
+
+/* enter_failsafe : verrou (si lock), output = 0 et mode = OFF sous une seule
+ * prise du mutex. Aucun try_set_mode ni commit_output concurrent ne peut
+ * s'intercaler entre ces trois écritures. */
+void ecu_state_enter_failsafe(bool lock);
 
 ecu_mode_t ecu_state_get_mode(void);
 float      ecu_state_get_setpoint(void);

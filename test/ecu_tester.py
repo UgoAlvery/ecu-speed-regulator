@@ -20,6 +20,10 @@ MOTOR_GAIN = 1.65
 DRAG_COEFF = 0.9
 MODEL_RESPONSE = 1.2
 MAX_SPEED = 220.0
+# Exigence future de l'ECU moteur : coupure si aucun OUTPUT reçu pendant 300 ms.
+# Le firmware émet OUTPUT à chaque cycle de 100 ms dans tous les modes ; le
+# testeur mesure le plus grand écart observé entre deux OUTPUT.
+OUTPUT_SILENCE_LIMIT_S = 0.3
 
 # Codes des messages
 MSG_SETPOINT = 0x01
@@ -52,6 +56,8 @@ class ECUTester:
         self.last_rx_nonce = None  # anti-rejeu entrant, pour vérifier les trames de l'ECU
         self.replay_dropped = 0    # trames locales rejetées côté script (nonce ECU non croissant)
         self.last_speed_frame = None  # dernière trame SPEED envoyée, pour le test de rejeu
+        self.last_output_time = None  # réception du dernier OUTPUT (signal de vie)
+        self.max_output_gap = 0.0     # plus grand écart entre deux OUTPUT reçus
 
     def log(self, message):
         timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
@@ -150,6 +156,11 @@ class ECUTester:
                             self.last_rx_nonce = nonce
 
                             if msg_type == MSG_OUTPUT:
+                                now = time.time()
+                                if self.last_output_time is not None:
+                                    self.max_output_gap = max(self.max_output_gap,
+                                                              now - self.last_output_time)
+                                self.last_output_time = now
                                 self.last_output = struct.unpack('<f', payload)[0]
                                 self.log(f"[SPEED] ({self.current_speed:.2f} km/h) | Commande: {self.last_output:.2f}")
 
@@ -230,6 +241,18 @@ class ECUTester:
         else:
             self.log("ÉCHEC : L'ECU n'est pas passé en mode Failsafe")
 
+    def report_output_liveness(self):
+        """OUTPUT est un signal de vie : jamais plus de 300 ms sans trame."""
+        gap_ms = self.max_output_gap * 1000.0
+        if self.last_output_time is None:
+            self.log("ÉCHEC : aucun OUTPUT reçu")
+        elif self.max_output_gap <= OUTPUT_SILENCE_LIMIT_S:
+            self.log(f"SIGNAL DE VIE OK : écart max entre OUTPUT = {gap_ms:.0f} ms "
+                     f"(limite {OUTPUT_SILENCE_LIMIT_S * 1000:.0f} ms)")
+        else:
+            self.log(f"ÉCHEC SIGNAL DE VIE : écart max entre OUTPUT = {gap_ms:.0f} ms "
+                     f"> {OUTPUT_SILENCE_LIMIT_S * 1000:.0f} ms")
+
     def start(self):
         # Lancement du thread de lecture
         reader = threading.Thread(target=self.receive_feedback, daemon=True)
@@ -240,6 +263,7 @@ class ECUTester:
             self.run_stress_test()
             self.run_normal_operation(5)
             self.test_failsafe()
+            self.report_output_liveness()
         except KeyboardInterrupt:
             pass
         finally:

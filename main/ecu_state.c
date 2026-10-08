@@ -52,13 +52,6 @@ void ecu_state_init(void) {
 /*  Setters                                                                    */
 /* ─────────────────────────────────────────────────────────────────────────── */
 
-void ecu_state_set_mode(const ecu_mode_t mode)
-{
-    LOCK();
-    s_state.mode = mode;
-    UNLOCK();
-}
-
 void ecu_state_set_setpoint(const float setpoint)
 {
     LOCK();
@@ -70,13 +63,6 @@ void ecu_state_set_speed(const float speed)
 {
     LOCK();
     s_state.speed = speed;
-    UNLOCK();
-}
-
-void ecu_state_set_output(const float output)
-{
-    LOCK();
-    s_state.output = output;
     UNLOCK();
 }
 
@@ -103,6 +89,26 @@ bool ecu_state_try_set_mode(const ecu_mode_t mode)
     }
     UNLOCK();
     return !refused;
+}
+
+float ecu_state_commit_output(const float requested)
+{
+    LOCK_RET(0.0f);
+    const float v = (s_state.mode == ECU_MODE_AUTO) ? requested : 0.0f;
+    s_state.output = v;
+    UNLOCK();
+    return v;
+}
+
+void ecu_state_enter_failsafe(const bool lock)
+{
+    LOCK();
+    if (lock) {
+        s_state.failsafe_locked = true;
+    }
+    s_state.output = 0.0f;
+    s_state.mode   = ECU_MODE_OFF;
+    UNLOCK();
 }
 
 /* ─────────────────────────────────────────────────────────────────────────── */

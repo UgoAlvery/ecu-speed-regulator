@@ -21,7 +21,7 @@ pid.h / .c          → lib pure sans état global (struct pid_t passée en para
 failsafe.h / .c     → task_failsafe + ISR GPIO + LED d'état
 failsafe_line.h/.c  → machine à états de la ligne NC (latch, anti-rebond) — lib pure
 task_rx.h / .c      → UART init + parser état machine + compteurs RX
-task_control.h / .c → dispatch trames + boucle PID 100 ms
+task_control.h / .c → dispatch trames + boucle PID 100 ms + unique émetteur d'OUTPUT
 task_tx.h / .c      → émission UART (seul écrivain UART, seul encodeur)
 task_telemetry.h/.c → émission STATS 1 s
 ```
@@ -224,15 +224,15 @@ typedef struct {
 } ecu_state_t;
 
 void       ecu_state_init(void);
-// Setters (prennent le mutex en interne)
-void       ecu_state_set_mode(ecu_mode_t mode);
+// Setters simples (prennent le mutex en interne)
 void       ecu_state_set_speed(float speed);
 void       ecu_state_set_setpoint(float setpoint);
-void       ecu_state_set_output(float output);
 void       ecu_state_set_last_rx_tick(TickType_t tick);
 void       ecu_state_set_failsafe_locked(bool locked);
-// Écriture conditionnelle atomique : refuse AUTO si failsafe_locked
-bool       ecu_state_try_set_mode(ecu_mode_t mode);
+// Lecture-modification-écriture atomiques (une seule prise du mutex)
+bool       ecu_state_try_set_mode(ecu_mode_t mode);      // refuse AUTO si failsafe_locked
+float      ecu_state_commit_output(float requested);     // AUTO ? requested : 0, retourne la valeur
+void       ecu_state_enter_failsafe(bool lock);          // [verrou] + output=0 + OFF
 // Getters (prennent le mutex en interne)
 ecu_mode_t ecu_state_get_mode(void);
 float      ecu_state_get_speed(void);
@@ -249,7 +249,12 @@ TickType_t ecu_state_get_last_rx_tick(void);
   un `get` suivi d'un `set` pour décider d'une écriture : une autre tâche pourrait
   modifier l'état entre les deux appels. Les getters et setters simples restent
   réservés aux accès indépendants (une seule lecture, ou une écriture inconditionnelle)
-- Fonctions de ce type : `ecu_state_try_set_mode` (refuse AUTO si `failsafe_locked`).
+- Fonctions de ce type : `ecu_state_try_set_mode` (refuse AUTO si `failsafe_locked`),
+  `ecu_state_commit_output` (relit le mode et fixe la commande), `ecu_state_enter_failsafe`
+  (verrou + commande 0 + OFF). Il n'existe **pas** de `set_mode` ni de `set_output`
+  inconditionnels : le mode ne s'écrit que par ces fonctions, ce qui rend le verrou
+  failsafe impossible à contourner. `output` n'a qu'un écrivain en régime normal :
+  task_control, via `commit_output`
   Chacune garde une section critique courte et bornée : quelques champs copiés ou
   comparés, aucun appel bloquant, aucun log
 
@@ -313,17 +318,18 @@ void task_failsafe(void *pvParameters);
 - Latch et anti-rebond dans `failsafe_line.c` (lib pure, testée en host) :
   `TRIP` au premier front ou niveau ouvert, puis `NONE` tant que verrouillé (une seule
   ALARM par entrée en failsafe) ; `UNLOCK` après 2 polls consécutifs ligne fermée
-- Au déclenchement GPIO : `set_failsafe_locked(true)`, puis ecu_state → output=0,
-  OFF, puis OUTPUT(0) et ALARM dans queue_tx (timeout 0), LED GPIO25 allumée
+- Au déclenchement GPIO : `ecu_state_enter_failsafe(true)` (verrou + output=0 + OFF en
+  une prise du mutex), puis ALARM dans queue_tx, LED GPIO25 allumée. **task_failsafe
+  n'émet pas d'OUTPUT** : task_control émet OUTPUT(0) à son prochain cycle (≤ 100 ms),
+  puis à chaque cycle
 - Silence UART : même séquence sans verrou ; fin du failsafe UART quand le mode
   quitte OFF (reprise EF-06)
 - LED GPIO25 = failsafe GPIO actif **ou** failsafe UART actif ; seul task_failsafe
   l'écrit
 - Reprise : MODE_SET appliqué via `ecu_state_try_set_mode` — AUTO refusé tant que
   `failsafe_locked`, compteur `mode_refused` (STATS)
-- EF-05 (< 5 ms) tenue pour l'état interne (OFF, output=0) ; l'annonce
-  OUTPUT(0)/ALARM sur la ligne passe par task_tx (prio 3) et n'est pas bornée à
-  5 ms sous charge — cf. `rta_fmea.md` §6.1
+- EF-05 (< 5 ms) tenue pour l'état interne (OFF, output=0) ; ALARM et OUTPUT(0) sur la
+  ligne sont bornés séparément — cf. `rta_fmea.md` §6.1
 
 ---
 
@@ -383,7 +389,7 @@ et action de stress dédiée (rejeu de la dernière trame SPEED acceptée, cf. `
 | 1 | `rx_crc_error` | task_rx           | Trames rejetées par `protocol_decode`                   |
 | 2 | `rx_dropped`   | task_rx           | LEN incohérent, trame partielle expirée, `queue_frames` pleine |
 | 3 | `rx_replay`    | task_rx           | Nonce rejeté (rejeu / duplication / hors ordre)         |
-| 4 | `tx_output`    | task_tx           | Trames OUTPUT effectivement écrites sur l'UART          |
+| 4 | `tx_output`    | task_tx           | Trames OUTPUT effectivement écrites sur l'UART (10/s dans tous les modes depuis D7) |
 | 5 | `tx_dropped`   | task_control      | OUTPUT non émis faute de place dans `queue_tx`          |
 | 6 | `rx_invalid`   | task_control + task_rx (somme de deux compteurs) | Trame saine (CRC + nonce OK) rejetée au dispatch : longueur de payload ≠ taille du type, valeur non finie / hors domaine, type non attendu en RX |
 | 7 | `mode_refused` | task_control      | MODE_SET(AUTO) refusé : ligne failsafe GPIO ouverte (verrou) |

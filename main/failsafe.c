@@ -32,20 +32,6 @@ static failsafe_line_t s_line;
 static bool            s_uart_latched = false;  /* failsafe silence UART actif */
 
 
-/* Émet une trame OUTPUT (payload brut, task_tx encode). Utilisé au failsafe
- * pour annoncer explicitement la coupure moteur sur le bus : l'arrêt est
- * ainsi observable côté superviseur, pas seulement appliqué en interne. */
-static void send_motor_output(const float output)
-{
-    tx_message_t msg;
-    msg.type        = MSG_OUTPUT;
-    memcpy(msg.payload, &output, sizeof(float));
-    msg.payload_len = (uint16_t)sizeof(float);
-
-    xQueueSend(s_tx_queue, &msg, 0);
-}
-
-
 static void send_alarm(const char *cause)
 {
     /* task_tx est le SEUL encodeur : on lui transmet le payload BRUT. */
@@ -71,12 +57,13 @@ static void update_led(void)
 }
 
 
-static void trigger_failsafe(const char *cause)
+/* task_failsafe n'émet PAS d'OUTPUT : task_control en est l'unique émetteur
+ * (R-9). L'état passe à OFF / commande 0 ici, en une opération atomique ;
+ * task_control émet OUTPUT(0) à son prochain cycle (≤ 100 ms), puis à chaque
+ * cycle tant que le mode n'est pas AUTO. lock : verrou anti-AUTO (GPIO). */
+static void trigger_failsafe(const char *cause, const bool lock)
 {
-    ecu_state_set_output(0.0f);
-    ecu_state_set_mode(ECU_MODE_OFF);
-
-    send_motor_output(0.0f);   /* coupure moteur explicite et observable */
+    ecu_state_enter_failsafe(lock);
     send_alarm(cause);
 }
 
@@ -88,10 +75,10 @@ static void apply_line_action(const failsafe_line_action_t action, const char *c
 {
     switch (action) {
     case FAILSAFE_LINE_TRIP:
-        /* Verrou AVANT le passage en OFF : un MODE_SET(AUTO) concurrent est
-         * soit appliqué avant (puis écrasé par OFF), soit refusé. */
-        ecu_state_set_failsafe_locked(true);
-        trigger_failsafe(cause);
+        /* Verrou, commande 0 et OFF sous une seule prise du mutex : un
+         * MODE_SET(AUTO) concurrent est soit appliqué avant (puis écrasé par
+         * OFF), soit refusé. */
+        trigger_failsafe(cause, true);
         update_led();
         break;
     case FAILSAFE_LINE_UNLOCK:
@@ -125,7 +112,7 @@ static void poll_uart_silence(const TickType_t timeout_ticks)
     const TickType_t last_tick = ecu_state_get_last_rx_tick();
     if ((now - last_tick) >= timeout_ticks && current_mode != ECU_MODE_OFF) {
         s_uart_latched = true;
-        trigger_failsafe("FAILSAFE: UART silence > 2s");
+        trigger_failsafe("FAILSAFE: UART silence > 2s", false);
         update_led();
     }
 }

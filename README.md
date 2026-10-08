@@ -149,20 +149,27 @@ déclenchable par l'émetteur et coûterait du temps dans le cycle de régulatio
 
 | Mode     | Valeur | Comportement                                           |
 |----------|--------|--------------------------------------------------------|
-| `OFF`    | `0x00` | ECU inactif. Commande moteur forcée à 0.               |
-| `MANUAL` | `0x01` | Commande moteur à 0. Réservé usage futur.              |
+| `OFF`    | `0x00` | ECU inactif. `OUTPUT = 0` émis toutes les 100 ms.      |
+| `MANUAL` | `0x01` | `OUTPUT = 0` émis toutes les 100 ms. Réservé usage futur. |
 | `AUTO`   | `0x02` | Régulation PID active. OUTPUT émis toutes les 100 ms.  |
+
+**OUTPUT est émis à chaque cycle de 100 ms, dans tous les modes**, et par une seule tâche :
+`task_control`. Il vaut 0 hors `AUTO`. Une trame perdue sur la ligne est donc remplacée en
+≤ 100 ms, et le flux d'OUTPUT sert de **signal de vie** à l'actionneur. Une variante « un seul
+`OUTPUT = 0` à la sortie d'AUTO » a été écartée : si cette trame unique était perdue,
+l'actionneur garderait sa dernière commande indéfiniment.
 
 Un changement de mode (`MODE_SET`) est appliqué **au cycle de régulation suivant** : `task_control`
 lit `queue_mode` en tout début de cycle. La latence entre la réception et l'application est donc
 **≤ 100 ms**, plus le temps de réponse de `task_control` (quelques dizaines de µs). Elle est
 **bornée et déterministe**, et ne dépend pas de la charge sur `queue_frames`. Toute transition hors
-`AUTO` remet la commande moteur interne à 0 et réinitialise l'intégrateur PID.
+`AUTO` remet la commande à 0, émise dès ce cycle, et réinitialise l'intégrateur PID.
 
-> ⚠️ Limitation connue (`rta_fmea.md` F-19) : un `MODE_SET(OFF)` hors failsafe met la commande
-> **interne** à 0 et arrête l'émission des OUTPUT, mais n'émet pas de trame `OUTPUT = 0`. Seul le
-> failsafe annonce explicitement la coupure. L'actionneur doit donc aussi traiter l'absence
-> d'OUTPUT (timeout) comme un ordre d'arrêt.
+### Exigence future — ECU moteur (actionneur, axe 4)
+
+| Réf.  | Exigence |
+|-------|----------|
+| EM-01 | **L'ECU moteur coupe le moteur si aucune trame OUTPUT n'est reçue pendant 300 ms**, soit 3 cycles. Cela couvre la coupure de l'ECU, du bus ou de son alimentation (`rta_fmea.md` F-16). Le testeur mesure déjà l'écart maximal entre deux OUTPUT. |
 
 ---
 
@@ -170,11 +177,11 @@ lit `queue_mode` en tout début de cycle. La latence entre la réception et l'ap
 
 | Réf.  | Exigence              | Détail                                                                            |
 |-------|-----------------------|-----------------------------------------------------------------------------------|
-| EF-01 | Régulation périodique | OUTPUT émis toutes les **100 ms ± 5 ms** (jitter max) en mode AUTO                |
+| EF-01 | Régulation périodique | OUTPUT émis toutes les **100 ms ± 5 ms** (jitter max), dans tous les modes (0 hors AUTO) |
 | EF-02 | Algorithme PID        | PID discret avec anti-windup, sortie saturée dans `[0, 255]`                      |
 | EF-03 | Robustesse récepteur  | Trames malformées / incomplètes / invalides traitées sans blocage ni perte d'état |
 | EF-04 | Télémétrie            | STATS émis toutes les **1 s** : rx_valid, rx_crc_error, rx_dropped, rx_replay, tx_output, tx_dropped, rx_invalid, mode_refused, mode_cmd_overwritten, uptime_s |
-| EF-05 | Failsafe              | Déclenchement sur silence > 2 s **ou** ouverture de la ligne GPIO NC. **< 5 ms sur l'état interne** (commande à 0, mode OFF). Émission OUTPUT(0) + ALARM bornée séparément : ≤ 41 ms de temps de ligne au pire, ~4,6 ms à vide (`rta_fmea.md` §6.1) |
+| EF-05 | Failsafe              | Déclenchement sur silence > 2 s **ou** ouverture de la ligne GPIO NC. **< 5 ms sur l'état interne** (commande à 0, mode OFF). ALARM et OUTPUT(0) sur la ligne bornés séparément (`rta_fmea.md` §6.1) |
 | EF-06 | Reprise failsafe      | Reprise en mode AUTO dès réception d'un nouveau `MODE_SET` valide, ligne GPIO fermée |
 
 ---
@@ -231,10 +238,11 @@ Deux événements déclenchent le failsafe **indépendamment** :
 
 Actions au déclenchement :
 - Commande moteur forcée à `0` et passage en mode `OFF` — **< 5 ms** après le front (EF-05)
-- Émission d'une trame `OUTPUT = 0`. **L'arrêt physique du moteur a lieu quand l'organe
-  actionneur reçoit cet `OUTPUT = 0`**, et non au changement d'état interne de l'ECU. Le délai
-  dépend de la file d'émission : ~1 ms à vide, ≤ 37 ms de temps de ligne au pire
-  (`rta_fmea.md` §6.1)
+- `OUTPUT = 0` émis par `task_control` à son prochain cycle, puis à chaque cycle.
+  **L'arrêt physique du moteur a lieu quand l'organe actionneur reçoit cet `OUTPUT = 0`**,
+  et non au changement d'état interne de l'ECU : ≤ 100 ms (attente du cycle) + temps de ligne,
+  soit ~1 ms à vide et ≤ 41 ms au pire (`rta_fmea.md` §6.1). Au plus une trame non nulle déjà
+  validée peut partir après le failsafe ; elle est remplacée en ≤ 100 ms (§6.1 bis)
 - Émission d'un message `ALARM (0x85)` avec cause identifiée en clair — **une seule fois par
   entrée en failsafe** : les rebonds et fronts suivants n'en produisent pas d'autre
 - LED GPIO25 allumée tant que le failsafe est actif
@@ -327,6 +335,7 @@ Exécutés à chaque push par la CI GitHub Actions, avec le build firmware ESP-I
 | Stress test           | —     | Flood de messages, trames fragmentées, CRC invalides, rejeu de trame |
 | Reprise post-stress   | 5 s   | Vérification que la régulation repart correctement                 |
 | Test failsafe         | 2.5 s | Silence radio → vérification OUTPUT = 0 et ALARM reçu              |
+| Signal de vie         | —     | Écart max entre deux OUTPUT reçus ≤ 300 ms (EM-01), sur toute la session |
 
 ```bash
 pip install pyserial
