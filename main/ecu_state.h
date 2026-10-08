@@ -34,9 +34,11 @@ void ecu_state_set_output(float output);
 void ecu_state_set_last_rx_tick(TickType_t tick);
 void ecu_state_set_failsafe_locked(bool locked);
 
-/* Seule écriture conditionnelle de l'état : refuse ECU_MODE_AUTO tant que
- * failsafe_locked est vrai, test et écriture sous la MÊME prise de mutex.
- * Deux appels séparés (get_failsafe_locked puis set_mode) laisseraient
+/* Lecture-modification-écriture : toujours une fonction dédiée, sous une
+ * seule prise du mutex (règle du module, cf. technical_reference.md).
+ *
+ * try_set_mode : refuse ECU_MODE_AUTO tant que failsafe_locked est vrai.
+ * Deux appels séparés (lecture du verrou puis set_mode) laisseraient
  * task_failsafe verrouiller entre les deux et l'AUTO passerait quand même.
  * Retourne false si la demande est refusée (état inchangé). */
 bool ecu_state_try_set_mode(ecu_mode_t mode);

@@ -244,14 +244,14 @@ TickType_t ecu_state_get_last_rx_tick(void);
 **Règles** :
 - Mutex créé dans `ecu_state_init()`, appelée dans `app_main` avant les tâches
 - Chaque setter/getter prend et relâche le mutex — pas d'exposition du mutex
-- Pas de getter/setter combiné pour éviter les races entre read-modify-write
-- **Exception assumée : `ecu_state_try_set_mode`**. Le verrou failsafe impose une règle
-  « AUTO interdit si verrouillé ». Faite par l'appelant (`get` puis `set`), elle serait
-  elle-même un read-modify-write : task_failsafe pourrait verrouiller entre les deux et
-  l'AUTO passerait. Le test et l'écriture sont donc faits sous **une seule** prise du
-  mutex, dans ecu_state — même durée de section critique qu'un setter
-- Ordre côté failsafe : `set_failsafe_locked(true)` **avant** `set_mode(OFF)` — un
-  `try_set_mode(AUTO)` concurrent est soit appliqué avant puis écrasé par OFF, soit refusé
+- **Toute lecture-modification-écriture passe par une fonction dédiée du module
+  ecu_state, exécutée sous une seule prise du mutex.** Un appelant ne compose jamais
+  un `get` suivi d'un `set` pour décider d'une écriture : une autre tâche pourrait
+  modifier l'état entre les deux appels. Les getters et setters simples restent
+  réservés aux accès indépendants (une seule lecture, ou une écriture inconditionnelle)
+- Fonctions de ce type : `ecu_state_try_set_mode` (refuse AUTO si `failsafe_locked`).
+  Chacune garde une section critique courte et bornée : quelques champs copiés ou
+  comparés, aucun appel bloquant, aucun log
 
 ---
 
