@@ -21,7 +21,8 @@ pid.h / .c          → lib pure sans état global (struct pid_t passée en para
 failsafe.h / .c     → task_failsafe + ISR GPIO + LED d'état
 failsafe_line.h/.c  → machine à états de la ligne NC (latch, anti-rebond) — lib pure
 task_rx.h / .c      → UART init + parser état machine + compteurs RX
-task_control.h / .c → dispatch trames + boucle PID 100 ms + unique émetteur d'OUTPUT
+task_control.h / .c → dispatch trames + boucle PID 100 ms + OUTPUT périodique
+ecu_command.h / .c  → cœur mode / commande / verrou failsafe — lib pure, émetteur injecté
 task_tx.h / .c      → émission UART (seul écrivain UART, seul encodeur)
 task_telemetry.h/.c → émission STATS 1 s
 ```
@@ -228,13 +229,19 @@ typedef enum {
     ECU_MODE_AUTO   = 2,
 } ecu_mode_t;
 
+// ecu_mode_t et ecu_command_t viennent de ecu_command.h (lib pure)
 typedef struct {
     ecu_mode_t mode;
-    float      setpoint;
-    float      speed;
     float      output;
-    TickType_t last_rx_tick;   // pour le failsafe timeout 2s
     bool       failsafe_locked; // ligne failsafe GPIO ouverte : AUTO interdit
+} ecu_command_t;
+typedef bool (*ecu_output_emit_fn)(float output, void *ctx); // non bloquant
+
+typedef struct {
+    ecu_command_t cmd;          // mode, output, failsafe_locked
+    float         setpoint;
+    float         speed;
+    TickType_t    last_rx_tick; // pour le failsafe timeout 2s
 } ecu_state_t;
 
 void       ecu_state_init(void);
@@ -245,8 +252,10 @@ void       ecu_state_set_last_rx_tick(TickType_t tick);
 void       ecu_state_set_failsafe_locked(bool locked);
 // Lecture-modification-écriture atomiques (une seule prise du mutex)
 bool       ecu_state_try_set_mode(ecu_mode_t mode);      // refuse AUTO si failsafe_locked
-float      ecu_state_commit_output(float requested);     // AUTO ? requested : 0, retourne la valeur
-void       ecu_state_enter_failsafe(bool lock);          // [verrou] + output=0 + OFF
+bool       ecu_state_commit_output(float requested,      // AUTO ? requested : 0, PUIS emit
+                                   ecu_output_emit_fn emit, void *ctx);
+bool       ecu_state_enter_failsafe(bool lock,           // [verrou] + output=0 + OFF, PUIS emit(0)
+                                    ecu_output_emit_fn emit, void *ctx);
 // Getters (prennent le mutex en interne)
 ecu_mode_t ecu_state_get_mode(void);
 float      ecu_state_get_speed(void);
@@ -264,11 +273,16 @@ TickType_t ecu_state_get_last_rx_tick(void);
   modifier l'état entre les deux appels. Les getters et setters simples restent
   réservés aux accès indépendants (une seule lecture, ou une écriture inconditionnelle)
 - Fonctions de ce type : `ecu_state_try_set_mode` (refuse AUTO si `failsafe_locked`),
-  `ecu_state_commit_output` (relit le mode et fixe la commande), `ecu_state_enter_failsafe`
-  (verrou + commande 0 + OFF). Il n'existe **pas** de `set_mode` ni de `set_output`
-  inconditionnels : le mode ne s'écrit que par ces fonctions, ce qui rend le verrou
-  failsafe impossible à contourner. `output` n'a qu'un écrivain en régime normal :
-  task_control, via `commit_output`
+  `ecu_state_commit_output` (relit le mode, fixe la commande **et la met en queue**),
+  `ecu_state_enter_failsafe` (verrou + commande 0 + OFF **+ OUTPUT(0) en queue**). Leur logique
+  est dans `ecu_command.c` (lib pure, testée en host) ; ecu_state n'ajoute que le mutex. Il
+  n'existe **pas** de `set_mode` ni de `set_output` inconditionnels : le mode ne s'écrit que
+  par ces fonctions, ce qui rend le verrou failsafe impossible à contourner
+- **Émetteur appelé mutex tenu** (`emit`, D10) : toujours `task_tx_emit_output`, qui ajoute en
+  **fin** de queue_tx avec un **timeout de 0**. Jamais d'appel bloquant sous le mutex. Comme
+  toute trame OUTPUT est mise en queue sous ce mutex, l'ordre des OUTPUT sur la ligne est
+  l'ordre des sections critiques : aucune commande non nulle ne peut suivre l'OUTPUT(0) du
+  failsafe (`rta_fmea.md` §6.1 bis). Coût : sections critiques plus longues de `C_q` (§4.2)
   Chacune garde une section critique courte et bornée : quelques champs copiés ou
   comparés, aucun appel bloquant, aucun log
 
@@ -332,11 +346,12 @@ void task_failsafe(void *pvParameters);
 - Latch et anti-rebond dans `failsafe_line.c` (lib pure, testée en host) :
   `TRIP` au premier front ou niveau ouvert, puis `NONE` tant que verrouillé (une seule
   ALARM par entrée en failsafe) ; `UNLOCK` après 2 polls consécutifs ligne fermée
-- Au déclenchement GPIO : `ecu_state_enter_failsafe(true)` (verrou + output=0 + OFF en
-  une prise du mutex), puis ALARM en **tête** de queue_tx (`xQueueSendToFront`, timeout 0 ;
-  échec → `alarm_dropped`), LED GPIO25 allumée. **task_failsafe
-  n'émet pas d'OUTPUT** : task_control émet OUTPUT(0) à son prochain cycle (≤ 100 ms),
-  puis à chaque cycle
+- Au déclenchement GPIO : `ecu_state_enter_failsafe(true, task_tx_emit_output, queue_tx)` :
+  verrou + output=0 + OFF + **OUTPUT(0) en FIN de queue_tx**, sous une seule prise du mutex
+  (D10). Ce n'est pas `SendToFront` : le 0 passerait devant une commande non nulle déjà en
+  attente. Échec (queue pleine) → compteur failsafe additionné à `tx_dropped` ; task_control
+  ré-émet OUTPUT(0) à son prochain cycle (≤ 100 ms). Puis ALARM en **tête** de queue_tx
+  (`xQueueSendToFront`, timeout 0 ; échec → `alarm_dropped`), LED GPIO25 allumée
 - Silence UART : même séquence sans verrou ; fin du failsafe UART quand le mode
   quitte OFF (reprise EF-06)
 - LED GPIO25 = failsafe GPIO actif **ou** failsafe UART actif ; seul task_failsafe
@@ -405,7 +420,7 @@ et action de stress dédiée (rejeu de la dernière trame SPEED acceptée, cf. `
 | 2 | `rx_dropped`   | task_rx           | LEN incohérent, trame partielle expirée, `queue_frames` pleine |
 | 3 | `rx_replay`    | task_rx           | Nonce rejeté (rejeu / duplication / hors ordre)         |
 | 4 | `tx_output`    | task_tx           | Trames OUTPUT effectivement écrites sur l'UART (10/s dans tous les modes depuis D7) |
-| 5 | `tx_dropped`   | task_control      | OUTPUT non émis faute de place dans `queue_tx`          |
+| 5 | `tx_dropped`   | task_control + task_failsafe (somme de deux compteurs) | OUTPUT non émis faute de place dans `queue_tx` (périodique, ou OUTPUT(0) immédiat du failsafe) |
 | 6 | `rx_invalid`   | task_control + task_rx (somme de deux compteurs) | Trame saine (CRC + nonce OK) rejetée au dispatch : longueur de payload ≠ taille du type, valeur non finie / hors domaine, type non attendu en RX |
 | 7 | `mode_refused` | task_control      | MODE_SET(AUTO) refusé : ligne failsafe GPIO ouverte (verrou) |
 | 8 | `mode_cmd_overwritten` | task_rx   | MODE_SET écrasé dans `queue_mode` avant lecture par task_control |
@@ -440,7 +455,7 @@ Détail des marges par tâche : `rta_fmea.md` §8.
 
 ## Tests hébergés (host) — ✅ implémenté
 
-`protocol.c`, `pid.c` et `failsafe_line.c` sont testés nativement (GCC, sans ESP-IDF/FreeRTOS), profitant de
+`protocol.c`, `pid.c`, `failsafe_line.c` et `ecu_command.c` sont testés nativement (GCC, sans ESP-IDF/FreeRTOS), profitant de
 leur statut de libs pures.
 
 ```
@@ -452,10 +467,12 @@ test/unit/test_pid.c       → 41 assertions (init, reset, P/I/D, saturation, an
                               entrées NaN/Inf)
 test/unit/test_failsafe_line.c → 34 assertions (latch, debounce, ligne ouverte au boot,
                               déverrouillage anti-rebond)
+test/unit/test_ecu_command.c → 61 assertions (commit / failsafe / verrou, ordre des trames
+                              OUTPUT autour du failsafe sur FIFO simulée, queue pleine)
 test/unit/Makefile         → build natif, -fsanitize=address,undefined
 ```
 
-`make -C test/unit run` : build + exécution des trois suites. 209 assertions, 0 échec, aucun
+`make -C test/unit run` : build + exécution des quatre suites. 270 assertions, 0 échec, aucun
 warning, aucun trigger ASan/UBSan.
 
 ---
@@ -500,7 +517,7 @@ couvre donc pas `protocol_nonce_check_and_update`, testée unitairement à la pl
 | Job              | Runner       | Contenu                                                        |
 |------------------|--------------|-----------------------------------------------------------------|
 | `firmware-build` | ubuntu-latest| `espressif/esp-idf-ci-action@v1` (image Docker ESP-IDF v5.3.5), `idf.py build` cible esp32 |
-| `hosted-tests`   | ubuntu-latest| `make -C test/unit run` — 209 assertions, ASan/UBSan                 |
+| `hosted-tests`   | ubuntu-latest| `make -C test/unit run` — 270 assertions, ASan/UBSan                 |
 | `fuzz-smoke`     | ubuntu-latest| build + corpus de départ + 30 s de fuzzing libFuzzer sur `protocol_decode`, artefacts uploadés si crash |
 
 `fuzz-smoke` n'est pas une campagne de fuzzing complète (voir section Fuzzing ci-dessus

@@ -156,8 +156,10 @@ déclenchable par l'émetteur et coûterait du temps dans le cycle de régulatio
 | `MANUAL` | `0x01` | `OUTPUT = 0` émis toutes les 100 ms. Réservé usage futur. |
 | `AUTO`   | `0x02` | Régulation PID active. OUTPUT émis toutes les 100 ms.  |
 
-**OUTPUT est émis à chaque cycle de 100 ms, dans tous les modes**, et par une seule tâche :
-`task_control`. Il vaut 0 hors `AUTO`. Une trame perdue sur la ligne est donc remplacée en
+**OUTPUT est émis à chaque cycle de 100 ms, dans tous les modes**, par `task_control`. Il vaut
+0 hors `AUTO`. Seule exception : au failsafe, `task_failsafe` poste en plus un `OUTPUT = 0`
+immédiat (voir Mécanisme Failsafe). Toute trame OUTPUT est mise en queue sous le mutex de l'état
+partagé, ce qui garantit leur ordre sur la ligne. Une trame perdue sur la ligne est donc remplacée en
 ≤ 100 ms, et le flux d'OUTPUT sert de **signal de vie** à l'actionneur. Une variante « un seul
 `OUTPUT = 0` à la sortie d'AUTO » a été écartée : si cette trame unique était perdue,
 l'actionneur garderait sa dernière commande indéfiniment.
@@ -184,7 +186,7 @@ lit `queue_mode` en tout début de cycle. La latence entre la réception et l'ap
 | EF-02 | Algorithme PID        | PID discret avec anti-windup, sortie saturée dans `[0, 255]`                      |
 | EF-03 | Robustesse récepteur  | Trames malformées / incomplètes / invalides traitées sans blocage ni perte d'état |
 | EF-04 | Télémétrie            | STATS émis toutes les **1 s** : rx_valid, rx_crc_error, rx_dropped, rx_replay, tx_output, tx_dropped, rx_invalid, mode_refused, mode_cmd_overwritten, alarm_dropped, rx_out_of_range, uptime_s |
-| EF-05 | Failsafe              | Déclenchement sur silence > 2 s **ou** ouverture de la ligne GPIO NC. **< 5 ms sur l'état interne** (commande à 0, mode OFF). ALARM émise en tête de file, ≤ 19,5 ms de temps de ligne au pire (~3,6 ms à vide). OUTPUT(0) ≤ 100 ms + temps de ligne (`rta_fmea.md` §6.1) |
+| EF-05 | Failsafe              | Déclenchement sur silence > 2 s **ou** ouverture de la ligne GPIO NC. **< 5 ms sur l'état interne** (commande à 0, mode OFF). ALARM émise en tête de file, ≤ 19,5 ms de temps de ligne au pire (~3,6 ms à vide). OUTPUT(0) mis en queue immédiatement : ~1–4,6 ms à vide, ≤ 50 ms de temps de ligne au pire (`rta_fmea.md` §6.1) |
 | EF-06 | Reprise failsafe      | Reprise en mode AUTO dès réception d'un nouveau `MODE_SET` valide, ligne GPIO fermée |
 
 ---
@@ -241,11 +243,14 @@ Deux événements déclenchent le failsafe **indépendamment** :
 
 Actions au déclenchement :
 - Commande moteur forcée à `0` et passage en mode `OFF` — **< 5 ms** après le front (EF-05)
-- `OUTPUT = 0` émis par `task_control` à son prochain cycle, puis à chaque cycle.
+- `OUTPUT = 0` mis en queue **immédiatement**, dans la même section critique que le passage en
+  `OFF` et à la suite des trames déjà en attente, puis ré-émis par `task_control` à chaque cycle.
   **L'arrêt physique du moteur a lieu quand l'organe actionneur reçoit cet `OUTPUT = 0`**,
-  et non au changement d'état interne de l'ECU : ≤ 100 ms (attente du cycle) + temps de ligne,
-  soit ~1 ms à vide et ≤ 47 ms au pire (`rta_fmea.md` §6.1). Au plus une trame non nulle déjà
-  validée peut partir après le failsafe ; elle est remplacée en ≤ 100 ms (§6.1 bis)
+  et non au changement d'état interne de l'ECU : ~1 à 4,6 ms à vide (selon que l'ALARM part
+  avant ou après), ≤ 50 ms de temps de ligne au pire (`rta_fmea.md` §6.1). **Aucune commande non
+  nulle ne peut le suivre** jusqu'à la reprise (démonstration : `rta_fmea.md` §6.1 bis). Si la
+  file d'émission est pleine, l'OUTPUT(0) est compté dans `tx_dropped` et `task_control` le
+  ré-émet en ≤ 100 ms
 - Émission d'un message `ALARM (0x85)` avec cause identifiée en clair, **en tête de la file
   d'émission** : elle passe devant les OUTPUT et STATS en attente. Une seule ALARM par entrée en
   failsafe : les rebonds et fronts suivants n'en produisent pas d'autre. Une ALARM perdue faute
@@ -279,7 +284,8 @@ ecu/
     ├── CMakeLists.txt
     ├── main.c                  ← app_main : init + création tâches + démarrage scheduler
     ├── board_pins.h            ← Brochage ESP32 #1 (UART2, failsafe, LED, TWAI réservé)
-    ├── ecu_state.h / .c        ← État partagé (mode, setpoint, speed, output, last_rx_tick)
+    ├── ecu_state.h / .c        ← État partagé sous mutex (setpoint, speed, last_rx_tick + cœur ci-dessous)
+    ├── ecu_command.h / .c      ← Mode / commande / verrou failsafe, ordre des OUTPUT — lib pure
     ├── protocol.h / .c         ← encode_frame, decode_frame, compute_crc — lib pure sans état
     ├── pid.h / .c              ← Calcul PID discret — lib pure sans état global
     ├── failsafe.h / .c         ← task_failsafe + ISR GPIO + LED
@@ -326,7 +332,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 ### Tests automatisés (sans matériel)
 
 ```bash
-make -C test/unit run                 # 209 assertions protocol.c, pid.c, failsafe_line.c (ASan/UBSan)
+make -C test/unit run                 # 270 assertions protocol.c, pid.c, failsafe_line.c, ecu_command.c (ASan/UBSan)
 make -C test/fuzz fuzz SECONDS=60     # fuzzing libFuzzer de protocol_decode
 ```
 

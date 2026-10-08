@@ -38,12 +38,10 @@ void ecu_state_init(void) {
         ESP_LOGE(TAG, "xSemaphoreCreateMutex failed - halting");
         for (;;) { vTaskDelay(portMAX_DELAY); }
     }
-    s_state.mode         = ECU_MODE_OFF;
+    ecu_command_init(&s_state.cmd);
     s_state.setpoint     = 0.0f;
     s_state.speed        = 0.0f;
-    s_state.output       = 0.0f;
     s_state.last_rx_tick = 0;
-    s_state.failsafe_locked = false;
 
     ESP_LOGI(TAG, "initialized (mode=OFF)");
 }
@@ -76,39 +74,38 @@ void ecu_state_set_last_rx_tick(const TickType_t tick)
 void ecu_state_set_failsafe_locked(const bool locked)
 {
     LOCK();
-    s_state.failsafe_locked = locked;
+    ecu_command_set_failsafe_locked(&s_state.cmd, locked);
     UNLOCK();
 }
 
 bool ecu_state_try_set_mode(const ecu_mode_t mode)
 {
     LOCK_RET(false);
-    const bool refused = (mode == ECU_MODE_AUTO) && s_state.failsafe_locked;
-    if (!refused) {
-        s_state.mode = mode;
-    }
+    const bool accepted = ecu_command_try_set_mode(&s_state.cmd, mode);
     UNLOCK();
-    return !refused;
+    return accepted;
 }
 
-float ecu_state_commit_output(const float requested)
+/* emit est appelé MUTEX TENU : il doit être non bloquant (xQueueSend… avec
+ * timeout 0). La section critique s'allonge d'une opération de queue (C_q,
+ * rta_fmea.md §4.2) ; c'est le prix de l'ordre garanti des trames OUTPUT. */
+bool ecu_state_commit_output(const float requested,
+                             const ecu_output_emit_fn emit, void *ctx)
 {
-    LOCK_RET(0.0f);
-    const float v = (s_state.mode == ECU_MODE_AUTO) ? requested : 0.0f;
-    s_state.output = v;
+    LOCK_RET(false);
+    const bool queued = ecu_command_commit_output(&s_state.cmd, requested, emit, ctx);
     UNLOCK();
-    return v;
+    return queued;
 }
 
-void ecu_state_enter_failsafe(const bool lock)
+bool ecu_state_enter_failsafe(const bool lock,
+                              const ecu_output_emit_fn emit, void *ctx)
 {
-    LOCK();
-    if (lock) {
-        s_state.failsafe_locked = true;
-    }
-    s_state.output = 0.0f;
-    s_state.mode   = ECU_MODE_OFF;
+    /* Échec du mutex (impossible après init) : on ne peut pas garantir l'état. */
+    LOCK_RET(false);
+    const bool queued = ecu_command_enter_failsafe(&s_state.cmd, lock, emit, ctx);
     UNLOCK();
+    return queued;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -118,7 +115,7 @@ void ecu_state_enter_failsafe(const bool lock)
 ecu_mode_t ecu_state_get_mode(void)
 {
     LOCK_RET(ECU_MODE_OFF);
-    const ecu_mode_t v = s_state.mode;
+    const ecu_mode_t v = s_state.cmd.mode;
     UNLOCK();
     return v;
 }
@@ -142,7 +139,7 @@ float ecu_state_get_speed(void)
 float ecu_state_get_output(void)
 {
     LOCK_RET(0.0f);
-    const float v = s_state.output;
+    const float v = s_state.cmd.output;
     UNLOCK();
     return v;
 }

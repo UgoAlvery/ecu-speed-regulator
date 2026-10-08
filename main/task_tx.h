@@ -24,4 +24,10 @@ void     task_tx_init(QueueHandle_t tx_queue);
 void     task_tx(void *pvParameters);
 uint32_t task_tx_get_count_output(void);
 
+/* Met une trame OUTPUT (payload brut) en FIN de la queue passée en ctx
+ * (QueueHandle_t), timeout 0. Retourne false si la queue est pleine.
+ * Signature compatible ecu_output_emit_fn : c'est l'émetteur passé à
+ * ecu_state_commit_output / ecu_state_enter_failsafe, appelé mutex tenu. */
+bool task_tx_emit_output(float output, void *ctx);
+
 #endif //ECU_TASK_TX_H

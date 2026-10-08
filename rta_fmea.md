@@ -140,32 +140,51 @@ cumulent `C_fs/100 ms + C_ctrl/100 ms + 11 520 · C_rx` : tant que
 ### 4.1 Sections critiques
 
 Chaque getter et setter d'`ecu_state.c` prend le mutex, copie **un seul
-champ** (4 octets) puis le rend. Aucune section critique ne contient d'appel
-bloquant ni d'imbrication de verrou.
+champ** (4 octets) puis le rend. Deux sections critiques sont plus longues
+depuis D10 : `commit_output` (task_control) et `enter_failsafe`
+(task_failsafe). Elles mettent en plus une trame OUTPUT en queue_tx, mutex
+tenu, via `xQueueSendToBack` avec un **timeout de 0** (copie de
+`tx_message_t`, 134 o, sous le spinlock de la queue). Aucune section critique
+ne contient d'appel bloquant ni d'imbrication de mutex : la queue est
+protégée par un spinlock noyau, pas par un mutex, et elle n'attend jamais.
 
 | Tâche | Accès par activation |
 |---|---|
 | `task_rx` | 1 (`set_last_rx_tick`) par trame valide |
-| `task_control` | 1 (`get_mode`) + 1 (`commit_output`, tous modes, depuis D7) + 2 en AUTO (`get_setpoint`, `get_speed`) + 1 par trame dispatchée, + 1 par MODE_SET (`try_set_mode`) |
-| `task_failsafe` | 2 au polling (`get_mode`, `get_last_rx_tick`) + 1 au déverrouillage (`set_failsafe_locked`) ; **1** au déclenchement (`enter_failsafe` : verrou + commande 0 + OFF en une prise, depuis D7). Pire réveil : déclenchement sur front + poll dans la même itération = **3** |
+| `task_control` | 1 (`get_mode`) + 1 (`commit_output` + mise en queue de l'OUTPUT, tous modes ; section longue `C_cs + C_q` depuis D10) + 2 en AUTO (`get_setpoint`, `get_speed`) + 1 par trame dispatchée, + 1 par MODE_SET (`try_set_mode`) |
+| `task_failsafe` | 2 au polling (`get_mode`, `get_last_rx_tick`) + 1 au déverrouillage (`set_failsafe_locked`) ; **1** au déclenchement (`enter_failsafe` : verrou + commande 0 + OFF + mise en queue de l'OUTPUT(0) en une prise ; section longue `C_cs + C_q` depuis D10). Pire réveil : déclenchement sur front + poll dans la même itération = **3** |
 | `task_telemetry`, `task_tx` | 0 |
 
-`C_cs` désigne la durée d'une section critique : prise et restitution du
-mutex, avec le spinlock IDF. Ordre de grandeur : quelques µs. ⏳ à mesurer.
+`C_cs` désigne la durée d'une section critique simple : prise et restitution
+du mutex, avec le spinlock IDF. `C_q` désigne le surcoût d'une mise en queue
+non bloquante (copie de 134 o + spinlock de la queue, réveil éventuel de
+task_tx sans préemption, car task_tx est en prio 3). Ordres de grandeur :
+quelques µs chacun. ⏳ à mesurer.
 
 ### 4.2 Bornes
 
 - **Monocœur, héritage de priorité** (Priority Inheritance Protocol) : une
   tâche est bloquée au plus une fois par section critique d'une tâche moins
-  prioritaire. Pour `task_failsafe` : `B_fs ≤ C_cs`. Une fois le mutex
-  relâché, rx et control (prio 4) ne peuvent plus le reprendre avant que
-  failsafe (prio 5) ne se bloque.
+  prioritaire. Pour `task_failsafe`, la plus longue section moins prioritaire
+  est désormais `commit_output` de task_control : **`B_fs ≤ C_cs + C_q`**
+  (D10 ; `C_cs` avant). Une fois le mutex relâché, rx et control (prio 4) ne
+  peuvent plus le reprendre avant que failsafe (prio 5) ne se bloque.
 - **Double cœur** : rx ou control, s'ils tournent sur l'autre cœur, peuvent
   reprendre le mutex *entre* deux accès de failsafe. Chaque accès peut donc
-  être bloqué : `B_fs ≤ 3 · C_cs` (3 accès au plus par réveil depuis D7 ; 5 entre D2 et D7). Cela
-  reste négligeable devant 5 ms.
+  être bloqué : **`B_fs ≤ 3 · (C_cs + C_q)`** (3 accès au plus par réveil ;
+  `3 · C_cs` entre D7 et D10, `5 · C_cs` entre D2 et D7). Avec quelques µs
+  par terme, cela reste de l'ordre de la dizaine de µs, négligeable devant
+  5 ms.
+- **`task_control`** : `B_ctrl = 0` inchangé, aucune tâche moins prioritaire
+  ne prend le mutex. En revanche, l'interférence de failsafe (prio 5) sur
+  control inclut maintenant `C_q` lors d'un déclenchement. `task_rx` (même
+  priorité) peut attendre au plus une section `commit_output` (`C_cs + C_q`)
+  avant `set_last_rx_tick`, sans risque de perte : le buffer UART absorbe
+  178 ms de flux.
 - **Deadlock** : structurellement impossible. Il n'y a qu'un mutex, jamais
-  pris de façon imbriquée, et aucun appel bloquant sous le mutex.
+  pris de façon imbriquée, et aucun appel bloquant sous le mutex. La mise en
+  queue faite mutex tenu a un timeout de 0, et task_tx, qui consomme
+  queue_tx, ne prend jamais le mutex.
 
 ### 4.3 Termes de blocage cachés trouvés pendant l'analyse
 
@@ -279,74 +298,111 @@ correctif structurel est la recommandation R-1.
 
 ### 6.1 Décomposition du chemin GPIO
 
-Depuis D7, **task_control est l'unique émetteur d'OUTPUT** : il en émet un à
-chaque cycle de 100 ms, dans tous les modes, à 0 hors AUTO. task_failsafe ne
-fait que mettre l'état à jour et envoyer l'ALARM.
+**task_control** émet OUTPUT à chaque cycle de 100 ms dans tous les modes, à 0
+hors AUTO (D7). **task_failsafe** poste en plus un OUTPUT(0) immédiat, sous le
+même mutex que le passage en OFF (D10). Ces deux mises en queue passent par
+la même fonction, `task_tx_emit_output`, qui ajoute en fin de file avec un
+timeout de 0.
 
 ```
 front GPIO4 ─► ISR (xSemaphoreGiveFromISR) ─► task_failsafe (prio 5)
-            ─► ecu_state_enter_failsafe : verrou, output=0, OFF  ← (1) état interne sûr
-            ─► queue_tx, EN TÊTE : ALARM  (SendToFront, timeout 0) ← (2) annonce
-   prochain cycle task_control (≤ 100 ms) :
-            ─► ecu_state_commit_output → 0 ─► queue_tx : OUTPUT(0) ← (3) arrêt moteur
+            ─► ecu_state_enter_failsafe, UNE prise du mutex :
+                 verrou, output=0, OFF                      ← (1) état interne sûr
+                 OUTPUT(0) en FIN de queue_tx (timeout 0)    ← (3) arrêt moteur
+            ─► ALARM en TÊTE de queue_tx (SendToFront)      ← (2) annonce
             ─► task_tx (prio 3) ─► uart_write_bytes ─► ligne UART2
+   filet : chaque cycle de task_control (≤ 100 ms) ré-émet OUTPUT(0)
 ```
 
 | Étape | Borne | Commentaire |
 |---|---|---|
 | (1) État interne sûr | latence ISR + `C_fs` + `B_fs` ≈ **dizaines de µs** | Prio 5, préemption immédiate. ✅ largement < 5 ms (⏳ à confirmer en mesure) |
-| (2) ALARM sur la ligne | temps de ligne (ci-dessous) + interférence de task_tx par les tâches de prio ≥ 4 | Borne structurelle ci-dessous |
-| (3) OUTPUT(0) sur la ligne | attente du prochain cycle de task_control (**≤ 100 ms** + `R_ctrl`) + temps de ligne | L'arrêt physique du moteur a lieu ici |
+| (2) ALARM sur la ligne | temps de ligne (ci-dessous) + interférence de task_tx par les tâches de prio ≥ 4 | En tête de file |
+| (3) OUTPUT(0) sur la ligne | temps de ligne (ci-dessous), **sans attendre le cycle de task_control** depuis D10 | L'arrêt physique du moteur a lieu ici. Si queue_tx est pleine : compté dans `tx_dropped`, filet ≤ 100 ms |
 
-**Borne du temps de ligne.** Hypothèse : le message entre dans `queue_tx`.
-Sinon il est perdu : l'ALARM est comptée dans `alarm_dropped`, l'OUTPUT dans
-`tx_dropped` et remplacé au cycle suivant. Le protocole est sur UART2 depuis
-D1, donc aucun octet de console ne s'intercale. La FIFO TX matérielle peut
-contenir jusqu'à **128 o** déjà écrits.
+**Borne du temps de ligne.** Le protocole est sur UART2, donc aucun octet de
+console ne s'intercale. La FIFO TX matérielle peut contenir jusqu'à **128 o**
+déjà écrits. task_tx peut aussi être en train d'écrire une trame déjà retirée
+de la queue (≤ 56 o, un STATS). queue_tx a 8 places.
 
-- **ALARM (D8, `xQueueSendToFront`)** : elle passe devant tous les messages en
-  attente. Restent devant elle la FIFO (≤ 128 o) et la trame que task_tx est
-  en train d'écrire (≤ 56 o, un STATS). Seule une autre ALARM postée en tête
-  *après* elle peut la doubler, et il y en a au plus une autre par épisode :
-  silence UART puis ligne GPIO, ou l'inverse.
-- **OUTPUT(0)** (ajouté en queue) : au plus 7 messages devant, plus la FIFO.
+- **ALARM** (`SendToFront`) : devant elle, seulement la FIFO et la trame en
+  cours d'écriture. Elle peut aussi être doublée par au plus une autre ALARM
+  postée en tête après elle.
+- **OUTPUT(0)** (fin de file, posté *avant* l'ALARM) : devant lui, la FIFO, la
+  trame en cours, au plus 6 messages en attente (8 places moins l'OUTPUT(0) et
+  l'ALARM) et l'ALARM postée en tête juste après lui. Si task_tx, sur l'autre
+  cœur, retire l'OUTPUT(0) avant que l'ALARM ne soit postée, l'OUTPUT(0) part
+  en premier.
 
-| Scénario | (2) Fin de l'ALARM (41 o) | (3) Fin de l'OUTPUT(0) (12 o), après le cycle |
+| Scénario | (2) Fin de l'ALARM (41 o) | (3) Fin de l'OUTPUT(0) (12 o) |
 |---|---|---|
-| Nominal (queue et FIFO vides) | **3,6 ms** | **1,0 ms** |
+| Nominal (queue et FIFO vides) | **3,6 ms** | **1,0 ms** s'il part avant l'ALARM ; **4,6 ms** derrière l'ALARM (53 o) |
 | Pessimiste, ALARM seule | 128 + 56 + 41 = 225 o → **19,5 ms** | — |
 | Pessimiste, une seconde ALARM la double | 128 + 56 + 41 + 41 = 266 o → **23,1 ms** | — |
-| Pessimiste (FIFO pleine, 7 messages de taille max = STATS 56 o) | (avant D8, en fin de file : 128 + 392 + 41 = 561 o → 48,7 ms) | 128 + 392 + 12 = 532 o → **46,2 ms** |
+| Pessimiste (FIFO pleine, trame en cours + 6 messages STATS 56 o devant, ALARM) | — | 128 + 56 + 336 + 41 + 12 = 573 o → **49,7 ms** |
+
+Correction : la borne pessimiste de l'OUTPUT(0) publiée avec D7–D9 (46,2 ms,
+plus 100 ms d'attente du cycle) ne comptait pas la trame en cours
+d'écriture. La valeur ci-dessus l'inclut.
 
 S'y ajoute l'interférence de `task_tx` par les tâches de priorité ≥ 4 pendant
 cette fenêtre (`C_ctrl`, `C_fs`, `C_rx` × octets reçus). Elle est finie tant
 que `C_rx < 86,8 µs` (§5). ⏳ À mesurer : front GPIO4 → fin de trame ALARM
-et fin de la première trame OUTPUT(0) sur GPIO17.
+et fin de trame OUTPUT(0) sur GPIO17.
 
 **Conclusion** : EF-05 (< 5 ms) porte sur **l'état interne**. L'ALARM est
-bornée séparément : **≤ 19,5 ms** de temps de ligne au pire (≤ 23,1 ms si une
-seconde ALARM la double), ~3,6 ms à vide. En fin de file (avant D8), elle
-aurait été de 48,7 ms avec les trames STATS actuelles. L'**arrêt physique** du moteur a lieu à la réception de
-l'OUTPUT(0) par l'actionneur : **≤ 100 ms + `R_ctrl` + temps de ligne**,
-soit ~101 ms en nominal. Avant D7, le failsafe postait lui-même un OUTPUT(0)
-(~1 ms en nominal). Le gain de D7 (écrivain unique, plus de course,
-répétition toutes les 100 ms) se paie donc par un arrêt annoncé jusqu'à un
-cycle plus tard.
+bornée séparément : ≤ 19,5 ms de temps de ligne au pire (≤ 23,1 ms si une
+seconde ALARM la double), ~3,6 ms à vide. L'**arrêt physique** du moteur a
+lieu à la réception de l'OUTPUT(0) par l'actionneur : depuis D10, **~1 à
+4,6 ms à vide**, ≤ 49,7 ms de temps de ligne au pire. Il ne dépend plus du
+cycle de task_control, qui reste le filet de ≤ 100 ms si l'OUTPUT(0) du
+failsafe est perdu (queue pleine).
 
-### 6.1 bis Risque résiduel de l'écrivain unique (D7)
+### 6.1 bis Ordre des trames OUTPUT autour du failsafe (D10)
 
-`task_control` relit le mode et fixe la commande dans **une seule** opération
-atomique, `ecu_state_commit_output`, juste avant la mise en queue. Un
-failsafe survenu pendant le calcul du PID est donc vu à ce moment-là et
-force 0.
+**Propriété.** Toute trame OUTPUT non nulle est mise en queue **avant**
+l'OUTPUT(0) du failsafe. Toutes les trames OUTPUT mises en queue après lui
+valent 0 jusqu'à la reprise (MODE_SET(AUTO) accepté). Sur la ligne,
+l'OUTPUT(0) du failsafe est donc suivi uniquement de trames OUTPUT(0)
+jusqu'à la reprise.
 
-Il reste une fenêtre entre `commit_output` et `xQueueSend`. Si le failsafe
-passe exactement là, sur l'autre cœur ou par préemption à priorité 5, **au
-plus une** trame OUTPUT non nulle déjà validée part après le passage en OFF,
-voire après l'ALARM. Elle est remplacée par OUTPUT(0) au cycle suivant, soit
-**≤ 100 ms**. La commande non nulle ne peut pas persister : OUTPUT est émis
-à chaque cycle, et l'état OFF est maintenu par le verrou (GPIO) ou jusqu'au
-prochain MODE_SET (UART).
+**Démonstration.**
+
+1. *Point d'entrée unique* : une trame OUTPUT n'est mise en queue que par
+   `task_tx_emit_output`, appelée uniquement depuis `ecu_command_commit_output`
+   (task_control) et `ecu_command_enter_failsafe` (task_failsafe). Ces deux
+   fonctions s'exécutent sous une **seule** prise de `mutex_ecu_state`
+   (`ecu_state_commit_output` / `ecu_state_enter_failsafe`).
+2. *Ordre total* : le mutex ordonne totalement ces sections critiques, y
+   compris entre les deux cœurs. Notons `S_f` la section du failsafe.
+3. *Avant `S_f`* : toute commande non nulle a été mise en queue dans une
+   section qui précède `S_f`.
+4. *Après `S_f`* : une section `commit_output` postérieure lit
+   `mode == OFF`, écrit par `S_f`, donc émet 0. Une seule exception : une
+   section `try_set_mode(AUTO)` acceptée s'est intercalée entre-temps. C'est
+   la reprise, refusée tant que la ligne GPIO est verrouillée.
+5. *Conservation de l'ordre* : les OUTPUT sont tous ajoutés en **fin** de
+   queue_tx. Seule l'ALARM utilise `SendToFront`, et ce n'est pas une trame
+   OUTPUT. task_tx retire les messages dans l'ordre FIFO et les écrit l'un
+   après l'autre sur un seul UART. L'ordre sur la ligne des trames OUTPUT
+   est donc l'ordre de leurs sections critiques. ∎
+
+La propriété est vérifiée en host (`test/unit/test_ecu_command.c`) pour
+toutes les positions du failsafe dans une suite de commits, la mise en queue
+étant simulée par une FIFO.
+
+**Ce que D10 supprime.** Entre D7 et D10, il existait une fenêtre entre
+`commit_output` et `xQueueSend`. Une trame non nulle déjà validée pouvait
+alors partir après le passage en OFF, et l'OUTPUT(0) n'arrivait qu'au cycle
+suivant (≤ 100 ms). Cette fenêtre n'existe plus : la décision et la mise en
+queue forment une seule section critique.
+
+**Résiduel.** Si queue_tx est pleine au moment de `S_f` (8 messages en
+attente), l'OUTPUT(0) du failsafe est perdu et compté dans `tx_dropped`. La
+dernière commande en attente, éventuellement non nulle, reste alors la
+dernière OUTPUT jusqu'au cycle suivant de task_control, qui émet 0 (≤ 100 ms,
+ou plus si la queue reste pleine, ce qui se voit aussi dans `tx_dropped`).
+Prix de D10 : des sections critiques plus longues de `C_q` (§4.2).
 
 ### 6.2 Rebonds GPIO
 
@@ -406,7 +462,7 @@ de bruit ou de rejeux ne maintient pas l'ECU en vie. ✅
 | F-17 | Dépassement de compteur | `uint32` : ~38 jours à 1 280 trames/s. Tick 32 bits à 100 Hz : 497 jours | — | Soustraction modulaire `now - last_tick` correcte | 1 | 1 | 2 | 2 | — |
 | F-18 | Gigue > ±5 ms sous flood (§5) | EF-01 violée | ⏳ mesure | — | 2 | 2 | 3 | 12 | **Ouvert** : ⏳ mesure de `C_rx` ; R-1 (changement de priorité) hors périmètre de la session D1–D5 |
 | F-19 | `MODE_SET(OFF)` hors failsafe (constaté en rédigeant D4) | Commande interne à 0, mais **aucune trame OUTPUT = 0 émise** : l'actionneur garde la dernière commande non nulle reçue | Testeur : écart max entre OUTPUT ; futur ECU moteur : coupure après 300 ms sans OUTPUT (EM-01) | OUTPUT émis à chaque cycle dans tous les modes, 0 hors AUTO | 4 | 1 | 1 | 4 | ✅ **Traité** (`e066822`, R-9) |
-| F-20 | Course failsafe / `task_control` (constaté en rédigeant D4) | task_control, en plein cycle AUTO, poste son OUTPUT(pid) **après** l'OUTPUT(0) du failsafe (double cœur, ou failsafe qui préempte entre `get_mode` et `enqueue_output`). La dernière commande sur le bus est alors non nulle | — | Écrivain unique d'OUTPUT (task_control), `commit_output` atomique juste avant la mise en queue | 4 | 1 | 2 | 8 | ✅ **Traité** (`e066822`, R-9). Résiduel documenté (§6.1 bis) : au plus une trame non nulle déjà validée après le failsafe, remplacée par OUTPUT(0) en ≤ 100 ms |
+| F-20 | Course failsafe / `task_control` (constaté en rédigeant D4) | task_control, en plein cycle AUTO, poste son OUTPUT(pid) **après** l'OUTPUT(0) du failsafe (double cœur, ou failsafe qui préempte entre `get_mode` et `enqueue_output`). La dernière commande sur le bus est alors non nulle | — | Décision de la commande et mise en queue sous une seule prise du mutex, OUTPUT(0) posté par le failsafe sous ce même mutex | 4 | 1 | 1 | 4 | ✅ **Traité** : `e066822` (R-9), fenêtre fermée par D10 (ordre démontré §6.1 bis). Résiduel : OUTPUT(0) perdu si queue_tx est pleine (`tx_dropped`), filet ≤ 100 ms |
 
 ### Recommandations
 
@@ -415,7 +471,7 @@ de bruit ou de rejeux ne maintient pas l'ECU en vie. ✅
 | R-1 | Rendre `task_control` **strictement** plus prioritaire que `task_rx` (par exemple rx et tx à 3). Le buffer RX de 2048 o absorbe 178 ms de flood alors que `C_ctrl` ≪ 1 ms : aucune perte. Le cas du §5 disparaît. À faire **après** la mesure, pour documenter l'avant/après. | F-18 | **Ouvert** : décision de priorité réservée, ⏳ mesure de `C_rx` |
 | R-2 | — (numéro non attribué) | — | — |
 | R-3 | Protocole sur UART2 (GPIO16/17), UART0 réservé à la console. Plus aucun log déclenchable par une trame reçue dans le cycle de `task_control` : compteurs à la place. | F-14, §4.3 | ✅ **Traité** — `1ca0e2d` |
-| R-4 | (a) Redéfinir EF-05 en deux temps : état interne < 5 ms, annonce sur le bus bornée séparément. (b) Au failsafe, `xQueueSendToFront` pour OUTPUT(0) et ALARM + compteur `failsafe_tx_dropped`. | F-08, §6.1 | ✅ **Traité** : (a) `4cd8f02` ; (b) `4b79d62` pour l'ALARM (`SendToFront`, compteur `alarm_dropped`). L'OUTPUT(0) n'est plus posté par le failsafe : il est répété par task_control (`e066822`) |
+| R-4 | (a) Redéfinir EF-05 en deux temps : état interne < 5 ms, annonce sur le bus bornée séparément. (b) Au failsafe, `xQueueSendToFront` pour OUTPUT(0) et ALARM + compteur `failsafe_tx_dropped`. | F-08, §6.1 | ✅ **Traité** : (a) `4cd8f02` ; (b) `4b79d62` pour l'ALARM (`SendToFront`, compteur `alarm_dropped`). OUTPUT(0) : posté en FIN de file par le failsafe sous le mutex (D10, pas `SendToFront`, sinon il doublerait une commande non nulle en attente) et répété par task_control à chaque cycle (`e066822`) |
 | R-5 | Ligne failsafe en **contact NC**, `GPIO_INTR_POSEDGE`, latch + anti-rebond logiciel, niveau relu au boot et au polling, verrou AUTO tant que la ligne est ouverte, LED GPIO25. (La désactivation de l'interruption dans l'ISR, envisagée au départ, est remplacée par le latch : un réveil sur rebond coûte quelques µs sans effet.) | F-13, F-15 | ✅ **Traité** — `233f002` (⏳ validation sur carte) |
 | R-6 | MODE_SET hors de `queue_frames` : `queue_mode` de longueur 1 écrite par `xQueueOverwrite`, lue en début de cycle | F-02 | ✅ **Traité** — `eb9c6d1` |
 | R-7 | Bornes de plausibilité sur SETPOINT `[0, 220]` et SPEED `[0, 242]`, constantes nommées dans `protocol.h`, compteur `rx_out_of_range`. À réviser avec l'actionneur réel (axe 4). | F-06 | ✅ **Traité** — `0051fd1` |
@@ -491,11 +547,12 @@ Validations fonctionnelles sur carte (hors mesure de temps) :
 9. Piles : `uxTaskGetStackHighWaterMark` relevé pour les 5 tâches après le
    stress test (marge restante en octets), puis dimensionnement des
    `STACK_*_BYTES` (R-8 b).
-10. OUTPUT(0) sur la ligne après retrait du jumper : sur GPIO17, la première
-    trame OUTPUT = 0 doit suivre le front GPIO4 dans le prochain cycle de
-    task_control, soit **≤ 100 ms + temps de ligne** (~101 ms à vide,
-    §6.1). Vérifier aussi qu'aucune trame non nulle ne suit cet OUTPUT(0)
-    (§6.1 bis : au plus une, et seulement avant lui).
+10. OUTPUT(0) sur la ligne après retrait du jumper (D10) : à vide, sur
+    GPIO17, la première trame OUTPUT = 0 doit se terminer **~1 ms** après le
+    front GPIO4 (latence interne + 1,0 ms de ligne), ou **~4,6 ms** si
+    l'ALARM, postée en tête, part avant elle (§6.1). **Aucune trame OUTPUT
+    non nulle** ne doit suivre jusqu'à la reprise (§6.1 bis), et les OUTPUT(0)
+    périodiques doivent continuer toutes les 100 ms.
 
 En complément : SEGGER SystemView via `esp_apptrace` pour l'historique
 d'ordonnancement (préemptions, migrations entre cœurs).

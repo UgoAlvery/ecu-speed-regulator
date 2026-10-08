@@ -8,7 +8,7 @@ MAIN_DIR = ../../main
 
 .PHONY: all run clean
 
-all: test_protocol test_pid test_failsafe_line
+all: test_protocol test_pid test_failsafe_line test_ecu_command
 
 test_protocol: test_protocol.c $(MAIN_DIR)/protocol.c $(MAIN_DIR)/protocol.h test_runner.h
 	$(CC) $(CFLAGS) -o $@ test_protocol.c $(MAIN_DIR)/protocol.c $(LDFLAGS)
@@ -19,12 +19,16 @@ test_pid: test_pid.c $(MAIN_DIR)/pid.c $(MAIN_DIR)/pid.h test_runner.h
 test_failsafe_line: test_failsafe_line.c $(MAIN_DIR)/failsafe_line.c $(MAIN_DIR)/failsafe_line.h test_runner.h
 	$(CC) $(CFLAGS) -o $@ test_failsafe_line.c $(MAIN_DIR)/failsafe_line.c $(LDFLAGS)
 
+test_ecu_command: test_ecu_command.c $(MAIN_DIR)/ecu_command.c $(MAIN_DIR)/ecu_command.h test_runner.h
+	$(CC) $(CFLAGS) -o $@ test_ecu_command.c $(MAIN_DIR)/ecu_command.c $(LDFLAGS)
+
 run: all
 	@status=0; \
 	./test_protocol || status=1; \
 	./test_pid      || status=1; \
 	./test_failsafe_line || status=1; \
+	./test_ecu_command   || status=1; \
 	exit $$status
 
 clean:
-	rm -f test_protocol test_pid test_failsafe_line
+	rm -f test_protocol test_pid test_failsafe_line test_ecu_command

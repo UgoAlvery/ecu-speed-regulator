@@ -35,6 +35,11 @@ static bool            s_uart_latched = false;  /* failsafe silence UART actif *
  * Écrivain unique task_failsafe, lu par task_telemetry (STATS). */
 static volatile uint32_t s_count_alarm_dropped = 0;
 
+/* OUTPUT(0) du failsafe non mis en queue (queue_tx pleine). Additionné par
+ * task_telemetry au compteur de task_control dans tx_dropped : deux
+ * compteurs à écrivain unique plutôt qu'un compteur à deux écrivains. */
+static volatile uint32_t s_count_output_dropped = 0;
+
 
 static void send_alarm(const char *cause)
 {
@@ -66,13 +71,16 @@ static void update_led(void)
 }
 
 
-/* task_failsafe n'émet PAS d'OUTPUT : task_control en est l'unique émetteur
- * (R-9). L'état passe à OFF / commande 0 ici, en une opération atomique ;
- * task_control émet OUTPUT(0) à son prochain cycle (≤ 100 ms), puis à chaque
- * cycle tant que le mode n'est pas AUTO. lock : verrou anti-AUTO (GPIO). */
+/* Verrou (si lock), OFF, commande 0 ET OUTPUT(0) en fin de queue_tx, sous une
+ * seule prise du mutex (D10) : l'arrêt est annoncé immédiatement, et aucune
+ * commande non nulle ne peut suivre cet OUTPUT(0). Si queue_tx est pleine,
+ * task_control émet OUTPUT(0) à son prochain cycle (≤ 100 ms). L'ALARM part
+ * ensuite en tête de queue. lock : verrou anti-AUTO (ligne GPIO). */
 static void trigger_failsafe(const char *cause, const bool lock)
 {
-    ecu_state_enter_failsafe(lock);
+    if (!ecu_state_enter_failsafe(lock, task_tx_emit_output, s_tx_queue)) {
+        s_count_output_dropped++;
+    }
     send_alarm(cause);
 }
 
@@ -139,6 +147,7 @@ static void IRAM_ATTR gpio_isr_handler(void *arg)
 }
 
 uint32_t failsafe_get_count_alarm_dropped(void) { return s_count_alarm_dropped; }
+uint32_t failsafe_get_count_output_dropped(void) { return s_count_output_dropped; }
 
 void failsafe_init(QueueHandle_t tx_queue)
 {

@@ -50,6 +50,25 @@ uint32_t task_tx_get_count_output(void)
     return s_count_tx_output;
 }
 
+bool task_tx_emit_output(const float output, void *ctx)
+{
+    const QueueHandle_t queue = (QueueHandle_t)ctx;
+    if (queue == NULL) {
+        return false;
+    }
+
+    /* task_tx est le SEUL encodeur : on lui transmet le payload BRUT. */
+    tx_message_t msg;
+    msg.type        = MSG_OUTPUT;
+    memcpy(msg.payload, &output, sizeof(float));
+    msg.payload_len = (uint16_t)sizeof(float);
+
+    /* FIN de queue, jamais en tête : l'ordre des OUTPUT dans queue_tx doit
+     * rester celui des commits sous mutex (rta_fmea.md §6.1 bis). Timeout 0 :
+     * appelé mutex_ecu_state tenu, ne doit jamais bloquer. */
+    return xQueueSendToBack(queue, &msg, 0) == pdTRUE;
+}
+
 void task_tx(void *pvParameters)
 {
     (void)pvParameters;

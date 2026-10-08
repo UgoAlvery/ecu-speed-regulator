@@ -10,19 +10,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-typedef enum {
-    ECU_MODE_OFF    = 0,
-    ECU_MODE_MANUAL = 1,
-    ECU_MODE_AUTO   = 2,
-} ecu_mode_t;
+#include "ecu_command.h"   /* ecu_mode_t, cœur mode / commande / verrou (pur) */
 
 typedef struct {
-    ecu_mode_t mode;
-    float      setpoint;
-    float      speed;
-    float      output;
-    TickType_t last_rx_tick;
-    bool       failsafe_locked;  /* ligne failsafe GPIO ouverte : AUTO interdit */
+    ecu_command_t cmd;        /* mode, output, failsafe_locked */
+    float         setpoint;
+    float         speed;
+    TickType_t    last_rx_tick;
 } ecu_state_t;
 
 void ecu_state_init(void);
@@ -41,17 +35,18 @@ void ecu_state_set_failsafe_locked(bool locked);
  * Retourne false si la demande est refusée (état inchangé). */
 bool ecu_state_try_set_mode(ecu_mode_t mode);
 
-/* commit_output : relit le mode et fixe la commande en une opération.
- * Mode AUTO → output = requested ; tout autre mode → output = 0. Retourne la
- * valeur retenue, seule valeur que task_control a le droit d'émettre.
- * Appelée juste avant la mise en queue de l'OUTPUT : un failsafe survenu
- * pendant le calcul du PID est vu ici et force 0. */
-float ecu_state_commit_output(float requested);
+/* commit_output : relit le mode, fixe la commande (requested en AUTO, 0
+ * sinon) ET la met en queue via emit, le tout sous une seule prise du mutex.
+ * emit doit être non bloquant (timeout 0). Retourne false si la trame n'a
+ * pas pu être mise en queue. */
+bool ecu_state_commit_output(float requested, ecu_output_emit_fn emit, void *ctx);
 
-/* enter_failsafe : verrou (si lock), output = 0 et mode = OFF sous une seule
- * prise du mutex. Aucun try_set_mode ni commit_output concurrent ne peut
- * s'intercaler entre ces trois écritures. */
-void ecu_state_enter_failsafe(bool lock);
+/* enter_failsafe : verrou (si lock), output = 0, mode = OFF, puis OUTPUT(0)
+ * en FIN de queue via emit, sous une seule prise du mutex. Comme toute
+ * commande non nulle est mise en queue sous ce même mutex, elle précède
+ * forcément cet OUTPUT(0) dans queue_tx (rta_fmea.md §6.1 bis). Retourne
+ * false si OUTPUT(0) n'a pas pu être mis en queue (l'état passe en OFF). */
+bool ecu_state_enter_failsafe(bool lock, ecu_output_emit_fn emit, void *ctx);
 
 ecu_mode_t ecu_state_get_mode(void);
 float      ecu_state_get_setpoint(void);

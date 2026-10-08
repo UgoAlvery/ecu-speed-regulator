@@ -1,7 +1,5 @@
 #include "task_control.h"
 
-#include <string.h>
-
 #include "ecu_state.h"
 #include "pid.h"
 #include "protocol.h"
@@ -52,7 +50,6 @@ static void dispatch_pending_frames(void);
 static void dispatch_frame(const ecu_frame_t *frame);
 static float compute_requested_output(pid_t *pid, ecu_mode_t mode);
 static void  emit_output(float requested);
-static bool  enqueue_output(float output);
 
 
 void task_control_init(const QueueHandle_t rx_queue, const QueueHandle_t mode_queue,
@@ -200,32 +197,15 @@ static float compute_requested_output(pid_t *pid, const ecu_mode_t mode)
 
 static void emit_output(const float requested)
 {
-    /* Relecture du mode juste avant la mise en queue, atomique avec
-     * l'écriture de la commande : si task_failsafe est passé entre le calcul
-     * du PID et ici, la valeur retenue est 0. Seul reste possible un failsafe
-     * APRÈS ce point : au plus une trame non nulle déjà validée part après
-     * l'ALARM, remplacée par OUTPUT(0) au cycle suivant (rta_fmea.md F-20). */
-    const float output = ecu_state_commit_output(requested);
-
-    if (!enqueue_output(output)) {
+    /* Relecture du mode, choix de la commande ET mise en queue (fin de file,
+     * timeout 0) sous une seule prise du mutex. task_failsafe passe en OFF et
+     * poste OUTPUT(0) sous ce même mutex : une commande non nulle est donc
+     * soit en queue AVANT son OUTPUT(0), soit remplacée par 0 ici. Aucune
+     * trame non nulle ne peut suivre l'OUTPUT(0) du failsafe (rta_fmea.md
+     * §6.1 bis). */
+    if (!ecu_state_commit_output(requested, task_tx_emit_output, s_tx_queue)) {
         /* Pas de log : ce chemin ne s'exécute qu'en surcharge (rta_fmea.md
          * §4.3). Le compteur tx_dropped remonte via STATS. */
         s_count_tx_dropped++;
     }
-}
-
-
-static bool enqueue_output(const float output)
-{
-    /* task_tx est le SEUL encodeur : on lui transmet le payload BRUT. */
-    tx_message_t msg;
-    msg.type        = MSG_OUTPUT;
-    memcpy(msg.payload, &output, sizeof(float));
-    msg.payload_len = (uint16_t)sizeof(float);
-
-    /* Timeout 0 (non bloquant), comme partout ailleurs dans l'architecture
-     * (xQueueSend task_rx/failsafe/telemetry, xQueueReceive task_control) :
-     * task_control ne doit jamais attendre sur une ressource externe pendant
-     * son cycle 100 ms — rejet silencieux + compteur, pas de blocage. */
-    return xQueueSend(s_tx_queue, &msg, 0) == pdTRUE;
 }

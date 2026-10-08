@@ -15,6 +15,7 @@
 
 void failsafe_init(QueueHandle_t tx_queue);
 uint32_t failsafe_get_count_alarm_dropped(void);
+uint32_t failsafe_get_count_output_dropped(void);
 
 
 void task_failsafe(void *pvParameters);

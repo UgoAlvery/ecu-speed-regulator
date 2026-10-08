@@ -53,7 +53,8 @@ void task_telemetry(void *pvParameters)
         uint32_t rx_dropped   = task_rx_get_count_dropped();
         uint32_t rx_replay    = task_rx_get_count_replay();
         uint32_t tx_output    = task_tx_get_count_output();
-        uint32_t tx_dropped   = task_control_get_count_tx_dropped();
+        uint32_t tx_dropped   = task_control_get_count_tx_dropped()
+                              + failsafe_get_count_output_dropped();
         uint32_t rx_invalid   = task_control_get_count_rx_invalid()
                               + task_rx_get_count_mode_invalid();
         uint32_t mode_refused = task_control_get_count_mode_refused();

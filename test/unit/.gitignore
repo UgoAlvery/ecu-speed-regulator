@@ -1,4 +1,5 @@
 test_protocol
 test_pid
 test_failsafe_line
+test_ecu_command
 *.o

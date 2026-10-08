@@ -2,6 +2,7 @@ idf_component_register(
         SRCS
         "main.c"
         "ecu_state.c"
+        "ecu_command.c"
         "protocol.c"
         "pid.c"
         "task_rx.c"
