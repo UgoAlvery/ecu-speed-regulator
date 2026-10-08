@@ -1,6 +1,8 @@
 #ifndef FAILSAFE_H
 #define FAILSAFE_H
 
+#include <stdint.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
@@ -12,6 +14,7 @@
 
 
 void failsafe_init(QueueHandle_t tx_queue);
+uint32_t failsafe_get_count_alarm_dropped(void);
 
 
 void task_failsafe(void *pvParameters);

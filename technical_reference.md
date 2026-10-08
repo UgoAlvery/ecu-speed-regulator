@@ -319,7 +319,8 @@ void task_failsafe(void *pvParameters);
   `TRIP` au premier front ou niveau ouvert, puis `NONE` tant que verrouillé (une seule
   ALARM par entrée en failsafe) ; `UNLOCK` après 2 polls consécutifs ligne fermée
 - Au déclenchement GPIO : `ecu_state_enter_failsafe(true)` (verrou + output=0 + OFF en
-  une prise du mutex), puis ALARM dans queue_tx, LED GPIO25 allumée. **task_failsafe
+  une prise du mutex), puis ALARM en **tête** de queue_tx (`xQueueSendToFront`, timeout 0 ;
+  échec → `alarm_dropped`), LED GPIO25 allumée. **task_failsafe
   n'émet pas d'OUTPUT** : task_control émet OUTPUT(0) à son prochain cycle (≤ 100 ms),
   puis à chaque cycle
 - Silence UART : même séquence sans verrou ; fin du failsafe UART quand le mode
@@ -381,7 +382,7 @@ et action de stress dédiée (rejeu de la dernière trame SPEED acceptée, cf. `
 
 ## Télémétrie STATS (0x83) — ordre du payload
 
-`TELEMETRY_STATS_COUNT = 10` × `uint32_t` little-endian = 40 octets, émis toutes les 1 s :
+`TELEMETRY_STATS_COUNT = 11` × `uint32_t` little-endian = 44 octets, émis toutes les 1 s :
 
 | # | Champ          | Écrivain unique   | Signification                                           |
 |---|----------------|-------------------|---------------------------------------------------------|
@@ -394,7 +395,8 @@ et action de stress dédiée (rejeu de la dernière trame SPEED acceptée, cf. `
 | 6 | `rx_invalid`   | task_control + task_rx (somme de deux compteurs) | Trame saine (CRC + nonce OK) rejetée au dispatch : longueur de payload ≠ taille du type, valeur non finie / hors domaine, type non attendu en RX |
 | 7 | `mode_refused` | task_control      | MODE_SET(AUTO) refusé : ligne failsafe GPIO ouverte (verrou) |
 | 8 | `mode_cmd_overwritten` | task_rx   | MODE_SET écrasé dans `queue_mode` avant lecture par task_control |
-| 9 | `uptime_s`     | task_telemetry    | Secondes depuis le démarrage de task_telemetry          |
+| 9 | `alarm_dropped` | task_failsafe    | ALARM non mise en queue : `queue_tx` pleine malgré `SendToFront` |
+| 10 | `uptime_s`    | task_telemetry    | Secondes depuis le démarrage de task_telemetry          |
 
 `tx_dropped` a été ajouté lors de la RTA : `enqueue_output()` bloquait jusqu'à 10 ms
 sur `queue_tx` pleine, terme de blocage hors budget ±5 ms — désormais timeout 0 +

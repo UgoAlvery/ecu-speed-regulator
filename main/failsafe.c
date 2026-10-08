@@ -31,6 +31,10 @@ static QueueHandle_t     s_tx_queue     = NULL;
 static failsafe_line_t s_line;
 static bool            s_uart_latched = false;  /* failsafe silence UART actif */
 
+/* ALARM non mises en queue faute de place (queue_tx pleine, 8 messages).
+ * Écrivain unique task_failsafe, lu par task_telemetry (STATS). */
+static volatile uint32_t s_count_alarm_dropped = 0;
+
 
 static void send_alarm(const char *cause)
 {
@@ -46,7 +50,12 @@ static void send_alarm(const char *cause)
     memcpy(msg.payload, cause, cause_len);
     msg.payload_len = (uint16_t)cause_len;
 
-    xQueueSend(s_tx_queue, &msg, 0);
+    /* En TÊTE de queue_tx : l'ALARM passe devant les OUTPUT/STATS en attente
+     * et n'attend que la trame en cours d'écriture (rta_fmea.md §6.1).
+     * Timeout 0 : échoue seulement si queue_tx est pleine → compteur. */
+    if (xQueueSendToFront(s_tx_queue, &msg, 0) != pdTRUE) {
+        s_count_alarm_dropped++;
+    }
 }
 
 
@@ -128,6 +137,8 @@ static void IRAM_ATTR gpio_isr_handler(void *arg)
 
     portYIELD_FROM_ISR(higher_priority_task_woken);
 }
+
+uint32_t failsafe_get_count_alarm_dropped(void) { return s_count_alarm_dropped; }
 
 void failsafe_init(QueueHandle_t tx_queue)
 {

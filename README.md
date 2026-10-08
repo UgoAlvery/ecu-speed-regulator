@@ -180,8 +180,8 @@ lit `queue_mode` en tout début de cycle. La latence entre la réception et l'ap
 | EF-01 | Régulation périodique | OUTPUT émis toutes les **100 ms ± 5 ms** (jitter max), dans tous les modes (0 hors AUTO) |
 | EF-02 | Algorithme PID        | PID discret avec anti-windup, sortie saturée dans `[0, 255]`                      |
 | EF-03 | Robustesse récepteur  | Trames malformées / incomplètes / invalides traitées sans blocage ni perte d'état |
-| EF-04 | Télémétrie            | STATS émis toutes les **1 s** : rx_valid, rx_crc_error, rx_dropped, rx_replay, tx_output, tx_dropped, rx_invalid, mode_refused, mode_cmd_overwritten, uptime_s |
-| EF-05 | Failsafe              | Déclenchement sur silence > 2 s **ou** ouverture de la ligne GPIO NC. **< 5 ms sur l'état interne** (commande à 0, mode OFF). ALARM et OUTPUT(0) sur la ligne bornés séparément (`rta_fmea.md` §6.1) |
+| EF-04 | Télémétrie            | STATS émis toutes les **1 s** : rx_valid, rx_crc_error, rx_dropped, rx_replay, tx_output, tx_dropped, rx_invalid, mode_refused, mode_cmd_overwritten, alarm_dropped, uptime_s |
+| EF-05 | Failsafe              | Déclenchement sur silence > 2 s **ou** ouverture de la ligne GPIO NC. **< 5 ms sur l'état interne** (commande à 0, mode OFF). ALARM émise en tête de file, ≤ 19,2 ms de temps de ligne au pire (~3,6 ms à vide). OUTPUT(0) ≤ 100 ms + temps de ligne (`rta_fmea.md` §6.1) |
 | EF-06 | Reprise failsafe      | Reprise en mode AUTO dès réception d'un nouveau `MODE_SET` valide, ligne GPIO fermée |
 
 ---
@@ -241,10 +241,12 @@ Actions au déclenchement :
 - `OUTPUT = 0` émis par `task_control` à son prochain cycle, puis à chaque cycle.
   **L'arrêt physique du moteur a lieu quand l'organe actionneur reçoit cet `OUTPUT = 0`**,
   et non au changement d'état interne de l'ECU : ≤ 100 ms (attente du cycle) + temps de ligne,
-  soit ~1 ms à vide et ≤ 41 ms au pire (`rta_fmea.md` §6.1). Au plus une trame non nulle déjà
+  soit ~1 ms à vide et ≤ 44 ms au pire (`rta_fmea.md` §6.1). Au plus une trame non nulle déjà
   validée peut partir après le failsafe ; elle est remplacée en ≤ 100 ms (§6.1 bis)
-- Émission d'un message `ALARM (0x85)` avec cause identifiée en clair — **une seule fois par
-  entrée en failsafe** : les rebonds et fronts suivants n'en produisent pas d'autre
+- Émission d'un message `ALARM (0x85)` avec cause identifiée en clair, **en tête de la file
+  d'émission** : elle passe devant les OUTPUT et STATS en attente. Une seule ALARM par entrée en
+  failsafe : les rebonds et fronts suivants n'en produisent pas d'autre. Une ALARM perdue faute
+  de place est comptée (`alarm_dropped` dans STATS)
 - LED GPIO25 allumée tant que le failsafe est actif
 
 **Reprise** (EF-06) : réception d'un message `MODE_SET` valide. **Exception** : tant que la ligne
