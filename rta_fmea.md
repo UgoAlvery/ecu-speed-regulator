@@ -74,9 +74,9 @@ campagne de mesure et à repérer les termes qui comptent.
 |---|---|---|---|
 | MODE_SET | 1 o | 9 o | 0,78 ms |
 | SETPOINT / SPEED / OUTPUT | 4 o | 12 o | 1,04 ms |
-| STATS | 28 o (7 × u32) | 36 o | 3,13 ms |
+| STATS | 40 o (10 × u32, depuis D3) | 48 o | 4,17 ms |
 | ALARM « UART silence » | 27 o | 35 o | 3,04 ms |
-| ALARM « GPIO » | 36 o | 44 o | 3,82 ms |
+| ALARM « GPIO » (cause la plus longue, depuis D2) | 33 o | 41 o | 3,56 ms |
 
 ---
 
@@ -289,13 +289,33 @@ front GPIO4 ─► ISR (xSemaphoreGiveFromISR) ─► task_failsafe (prio 5)
 | Étape | Borne | Commentaire |
 |---|---|---|
 | (1) État interne sûr | latence ISR + `C_fs` + `B_fs` ≈ **dizaines de µs** | Prio 5, préemption immédiate. ✅ largement < 5 ms (⏳ à confirmer en mesure) |
-| (2) OUTPUT(0) sur la ligne | attente de task_tx (prio 3, préemptable par rx/control) + messages déjà dans `queue_tx` (≤ 7 devant) + FIFO TX (≤ 128 o = 11,1 ms) + 1,04 ms | **Non borné à 5 ms** sous charge : facilement 5 à 20 ms |
+| (2) OUTPUT(0) puis ALARM sur la ligne | temps de ligne (ci-dessous) + interférence d'ordonnancement de task_tx (prio 3) par les tâches de prio ≥ 4 | Non borné à 5 ms sous charge. Borne structurelle ci-dessous |
 
-**Conclusion** : EF-05 est tenue **pour l'état interne** de l'ECU (output = 0,
-mode OFF, et la régulation s'arrête au cycle suivant). Elle n'est **pas**
-garantie pour l'**annonce** sur le bus. L'exigence doit être formulée
-explicitement : en axe 4, c'est l'ECU véhicule qui coupe le moteur, et c'est
-le temps « front → trame reçue » qui compte. Voir R-4.
+**Borne du temps de ligne (D4).** Hypothèse : les deux messages du failsafe
+entrent dans `queue_tx`. Sinon ils sont perdus (F-08, R-4 non implémentée).
+`queue_tx` a 8 places : au plus **6 messages** sont devant. Avant eux, la FIFO
+TX matérielle peut encore contenir jusqu'à **128 o** d'une trame précédente.
+Le protocole est sur UART2 depuis D1, donc aucun octet de console ne
+s'intercale.
+
+| Scénario | Octets avant la fin de l'OUTPUT(0) | Fin de l'OUTPUT(0) | Fin de l'ALARM (+41 o) |
+|---|---|---|---|
+| Nominal (queue et FIFO vides) | 12 | **1,0 ms** | **4,6 ms** |
+| Réaliste chargé (FIFO pleine, 5 OUTPUT + 1 STATS devant : au plus un STATS par seconde) | 128 + 108 + 12 = 248 | 21,5 ms | **25,1 ms** |
+| **Pessimiste** (FIFO pleine, 6 messages de taille max = STATS 48 o) | 128 + 288 + 12 = 428 | 37,2 ms | **40,7 ms** |
+
+S'y ajoute l'interférence de `task_tx` par les tâches de priorité ≥ 4 pendant
+cette fenêtre (`C_ctrl`, `C_fs`, `C_rx` × octets reçus). Elle est finie tant
+que `C_rx < 86,8 µs` (§5). ⏳ À mesurer : front GPIO4 → fin de trame ALARM
+sur GPIO17.
+
+**Conclusion** : EF-05 (< 5 ms) porte sur **l'état interne** de l'ECU
+(output = 0, mode OFF, régulation arrêtée au cycle suivant). L'**annonce** sur
+le bus est bornée séparément : **≤ 41 ms** de temps de ligne au pire,
+~4,6 ms à vide, plus l'interférence d'ordonnancement ⏳. L'arrêt physique du
+moteur a lieu à la réception de l'OUTPUT(0) par l'actionneur, au plus tard
+37,2 ms de temps de ligne après le front. Formulation reportée dans le README
+(D4).
 
 ### 6.2 Rebonds GPIO
 
@@ -354,6 +374,8 @@ de bruit ou de rejeux ne maintient pas l'ECU en vie. ✅
 | F-16 | Coupure d'alimentation de l'ECU | Plus aucune commande émise | Côté superviseur ou véhicule seulement | Aucune côté ECU | 4 | 2 | 3 | 24 | **Axe 4** : l'ECU véhicule doit avoir son propre timeout CAN → moteur à 0 |
 | F-17 | Dépassement de compteur | `uint32` : ~38 jours à 1 280 trames/s. Tick 32 bits à 100 Hz : 497 jours | — | Soustraction modulaire `now - last_tick` correcte | 1 | 1 | 2 | 2 | — |
 | F-18 | Gigue > ±5 ms sous flood (§5) | EF-01 violée | ⏳ mesure | — | 2 | 2 | 3 | 12 | → R-1 |
+| F-19 | `MODE_SET(OFF)` hors failsafe (constaté en rédigeant D4) | Commande interne à 0, mais **aucune trame OUTPUT = 0 émise** : l'actionneur garde la dernière commande non nulle reçue | Aucune côté ECU | Aucune | 4 | 2 | 4 | **32** | **Ouvert** → R-9 |
+| F-20 | Course failsafe / `task_control` (constaté en rédigeant D4) | task_control, en plein cycle AUTO, poste son OUTPUT(pid) **après** l'OUTPUT(0) du failsafe (double cœur, ou failsafe qui préempte entre `get_mode` et `enqueue_output`). La dernière commande sur le bus est alors non nulle | Aucune | État interne OFF : le cycle suivant n'émet plus rien | 4 | 1 | 4 | 16 | **Ouvert** → R-9 |
 
 ### Recommandations (par criticité décroissante)
 
@@ -365,6 +387,7 @@ de bruit ou de rejeux ne maintient pas l'ECU en vie. ✅
 | R-4 | Au failsafe, `xQueueSendToFront` pour OUTPUT(0) et ALARM + compteur `failsafe_tx_dropped`. Redéfinir EF-05 en deux temps : état interne < 5 ms, annonce sur le bus < X ms (mesuré) | F-08, §6.1 | Faible |
 | R-1 | Rendre `task_control` **strictement** plus prioritaire que `task_rx` (par exemple rx et tx à 3). Le buffer RX de 2048 o absorbe 178 ms de flood alors que `C_ctrl` ≪ 1 ms : aucune perte. Le cas du §5 disparaît. | F-18 | Trivial, mais à faire **après** la mesure pour la documenter avant/après |
 | R-3 | Déplacer le protocole sur UART2 (GPIO16/17, déjà prévu dans `brochage_materiel_GPIO.md` ; `uart_set_pin` est actuellement en `UART_PIN_NO_CHANGE` sur UART0) et laisser UART0 à la console. Dans tous les cas, plus aucun log ≥ INFO déclenchable par une trame reçue dans `task_control` (« payload trop court » → `ESP_LOGD` + compteur) | F-14, §4.3 | Faible (+ adaptateur USB-TTL) |
+| R-9 | Émettre un OUTPUT(0) depuis `task_control` à toute transition hors AUTO (F-19). Comme task_control est alors le dernier à écrire sur le bus pour ce cycle, la course F-20 se referme aussi. Changement de comportement : à décider, non implémenté | F-19, F-20 | Faible |
 | R-8 | Mesurer `uxTaskGetStackHighWaterMark` pour chaque tâche (mode diagnostic, axe 5) et dimensionner les piles. NB : sous ESP-IDF, `xTaskCreate` prend la pile **en octets**, pas en mots. Les macros `STACK_*_WORDS` de `main.c` sont donc mal nommées. | F-10 | Faible |
 
 ---

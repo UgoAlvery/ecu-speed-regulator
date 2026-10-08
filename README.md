@@ -153,7 +153,16 @@ déclenchable par l'émetteur et coûterait du temps dans le cycle de régulatio
 | `MANUAL` | `0x01` | Commande moteur à 0. Réservé usage futur.              |
 | `AUTO`   | `0x02` | Régulation PID active. OUTPUT émis toutes les 100 ms.  |
 
-Un changement de mode est pris en compte **immédiatement** par `task_control`. Toute transition hors `AUTO` remet la commande moteur à 0 et réinitialise l'intégrateur PID.
+Un changement de mode (`MODE_SET`) est appliqué **au cycle de régulation suivant** : `task_control`
+lit `queue_mode` en tout début de cycle. La latence entre la réception et l'application est donc
+**≤ 100 ms**, plus le temps de réponse de `task_control` (quelques dizaines de µs). Elle est
+**bornée et déterministe**, et ne dépend pas de la charge sur `queue_frames`. Toute transition hors
+`AUTO` remet la commande moteur interne à 0 et réinitialise l'intégrateur PID.
+
+> ⚠️ Limitation connue (`rta_fmea.md` F-19) : un `MODE_SET(OFF)` hors failsafe met la commande
+> **interne** à 0 et arrête l'émission des OUTPUT, mais n'émet pas de trame `OUTPUT = 0`. Seul le
+> failsafe annonce explicitement la coupure. L'actionneur doit donc aussi traiter l'absence
+> d'OUTPUT (timeout) comme un ordre d'arrêt.
 
 ---
 
@@ -165,7 +174,7 @@ Un changement de mode est pris en compte **immédiatement** par `task_control`. 
 | EF-02 | Algorithme PID        | PID discret avec anti-windup, sortie saturée dans `[0, 255]`                      |
 | EF-03 | Robustesse récepteur  | Trames malformées / incomplètes / invalides traitées sans blocage ni perte d'état |
 | EF-04 | Télémétrie            | STATS émis toutes les **1 s** : rx_valid, rx_crc_error, rx_dropped, rx_replay, tx_output, tx_dropped, rx_invalid, mode_refused, mode_cmd_overwritten, uptime_s |
-| EF-05 | Failsafe              | Déclenchement sur silence > 2 s **ou** ouverture de la ligne GPIO NC (réponse < 5 ms) |
+| EF-05 | Failsafe              | Déclenchement sur silence > 2 s **ou** ouverture de la ligne GPIO NC. **< 5 ms sur l'état interne** (commande à 0, mode OFF). Émission OUTPUT(0) + ALARM bornée séparément : ≤ 41 ms de temps de ligne au pire, ~4,6 ms à vide (`rta_fmea.md` §6.1) |
 | EF-06 | Reprise failsafe      | Reprise en mode AUTO dès réception d'un nouveau `MODE_SET` valide, ligne GPIO fermée |
 
 ---
@@ -216,14 +225,16 @@ Deux événements déclenchent le failsafe **indépendamment** :
    l'entrée à 1 : la rupture du câblage est elle-même une demande d'arrêt, il n'existe plus de
    défaut latent. Détection :
    - **front montant** → ISR → sémaphore binaire → `task_failsafe`, déclenchement dès le premier
-     front, sans attente de stabilisation (réponse **< 5 ms** sur l'état interne ; l'émission de
-     l'ALARM sur la ligne dépend ensuite de `task_tx`, cf. [`rta_fmea.md`](rta_fmea.md) §6) ;
+     front, sans attente de stabilisation (réponse **< 5 ms** sur l'état interne) ;
    - **niveau** relu au boot et à chaque polling (100 ms) : une ligne déjà ouverte avant le
      démarrage, qui ne produira jamais de front, est détectée (ALARM « line open at boot »).
 
 Actions au déclenchement :
-- Commande moteur forcée à `0`
-- Passage en mode `OFF`
+- Commande moteur forcée à `0` et passage en mode `OFF` — **< 5 ms** après le front (EF-05)
+- Émission d'une trame `OUTPUT = 0`. **L'arrêt physique du moteur a lieu quand l'organe
+  actionneur reçoit cet `OUTPUT = 0`**, et non au changement d'état interne de l'ECU. Le délai
+  dépend de la file d'émission : ~1 ms à vide, ≤ 37 ms de temps de ligne au pire
+  (`rta_fmea.md` §6.1)
 - Émission d'un message `ALARM (0x85)` avec cause identifiée en clair — **une seule fois par
   entrée en failsafe** : les rebonds et fronts suivants n'en produisent pas d'autre
 - LED GPIO25 allumée tant que le failsafe est actif
