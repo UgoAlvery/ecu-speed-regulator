@@ -119,3 +119,14 @@ bool protocol_parse_mode(const ecu_frame_t *frame, uint8_t *out) {
     *out = frame->payload[0];
     return true;
 }
+
+protocol_value_status_t protocol_parse_f32_bounded(const ecu_frame_t *frame,
+                                                   const float min, const float max,
+                                                   float *out) {
+    float val;
+    if (!out || !protocol_parse_f32(frame, &val)) return PROTOCOL_VALUE_INVALID;
+    if (val < min || val > max) return PROTOCOL_VALUE_OUT_OF_RANGE;
+
+    *out = val;
+    return PROTOCOL_VALUE_OK;
+}

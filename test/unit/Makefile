@@ -2,7 +2,7 @@ CC     = gcc
 CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -O0 -g \
          -I../../main \
          -fsanitize=address,undefined
-LDFLAGS = -fsanitize=address,undefined
+LDFLAGS = -fsanitize=address,undefined -lm
 
 MAIN_DIR = ../../main
 

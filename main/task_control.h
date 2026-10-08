@@ -17,5 +17,6 @@ void task_control(void *pvParameters);
 uint32_t task_control_get_count_tx_dropped(void);
 uint32_t task_control_get_count_rx_invalid(void);
 uint32_t task_control_get_count_mode_refused(void);
+uint32_t task_control_get_count_rx_out_of_range(void);
 
 #endif //ECU_TASK_CONTROL_H

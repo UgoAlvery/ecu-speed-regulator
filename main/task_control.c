@@ -38,6 +38,11 @@ static volatile uint32_t s_count_tx_dropped = 0;
  * Même écrivain unique (task_control). */
 static volatile uint32_t s_count_rx_invalid = 0;
 
+/* SETPOINT / SPEED bien formés mais hors bornes de plausibilité
+ * (PROTOCOL_SETPOINT_* / PROTOCOL_SPEED_*) : rejetés, dernière valeur valide
+ * conservée. Écrivain unique task_control. */
+static volatile uint32_t s_count_rx_out_of_range = 0;
+
 /* MODE_SET(AUTO) refusés parce que la ligne failsafe GPIO est ouverte
  * (verrou posé par task_failsafe, cf. ecu_state_try_set_mode). */
 static volatile uint32_t s_count_mode_refused = 0;
@@ -64,6 +69,7 @@ void task_control_init(const QueueHandle_t rx_queue, const QueueHandle_t mode_qu
 uint32_t task_control_get_count_tx_dropped(void) { return s_count_tx_dropped; }
 uint32_t task_control_get_count_rx_invalid(void) { return s_count_rx_invalid; }
 uint32_t task_control_get_count_mode_refused(void) { return s_count_mode_refused; }
+uint32_t task_control_get_count_rx_out_of_range(void) { return s_count_rx_out_of_range; }
 
 void task_control(void *pvParameters)
 {
@@ -134,27 +140,43 @@ static void dispatch_pending_frames(void)
 }
 
 
+static void count_rejection(const protocol_value_status_t status)
+{
+    if (status == PROTOCOL_VALUE_OUT_OF_RANGE) {
+        s_count_rx_out_of_range++;
+    } else {
+        s_count_rx_invalid++;
+    }
+}
+
+
 static void dispatch_frame(const ecu_frame_t *frame)
 {
-    /* Validation de longueur et de domaine dans protocol.c (lib pure, testée
-     * en host). Valeur rejetée : la dernière valeur valide est conservée. */
+    /* Validation de longueur, de domaine et de plausibilité dans protocol.c
+     * (lib pure, testée en host). Valeur rejetée : la dernière valeur valide
+     * est conservée. */
     float val;
+    protocol_value_status_t status;
 
     switch (frame->type) {
 
     case MSG_SETPOINT:
-        if (protocol_parse_f32(frame, &val)) {
+        status = protocol_parse_f32_bounded(frame, PROTOCOL_SETPOINT_MIN,
+                                            PROTOCOL_SETPOINT_MAX, &val);
+        if (status == PROTOCOL_VALUE_OK) {
             ecu_state_set_setpoint(val);
         } else {
-            s_count_rx_invalid++;
+            count_rejection(status);
         }
         break;
 
     case MSG_SPEED:
-        if (protocol_parse_f32(frame, &val)) {
+        status = protocol_parse_f32_bounded(frame, PROTOCOL_SPEED_MIN,
+                                            PROTOCOL_SPEED_MAX, &val);
+        if (status == PROTOCOL_VALUE_OK) {
             ecu_state_set_speed(val);
         } else {
-            s_count_rx_invalid++;
+            count_rejection(status);
         }
         break;
 

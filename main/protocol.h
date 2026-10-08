@@ -17,6 +17,14 @@
 /* Valeur max d'un MODE_SET (0=OFF, 1=MANUAL, 2=AUTO, cf. ecu_mode_t). */
 #define PROTOCOL_MODE_MAX  2u
 
+/* Bornes de plausibilité (km/h), inclusives. SPEED_MAX = SETPOINT_MAX + 10 %,
+ * marge pour un dépassement transitoire de consigne. Hors bornes : trame rejetée,
+ * dernière valeur valide conservée, compteur rx_out_of_range (rta_fmea R-7). */
+#define PROTOCOL_SETPOINT_MIN   0.0f
+#define PROTOCOL_SETPOINT_MAX   220.0f
+#define PROTOCOL_SPEED_MIN      0.0f
+#define PROTOCOL_SPEED_MAX      242.0f
+
 #define PROTOCOL_START_BYTE        0xAA
 #define PROTOCOL_MAX_PAYLOAD_SIZE  128
 #define PROTOCOL_NONCE_SIZE        2
@@ -60,5 +68,18 @@ bool protocol_nonce_check_and_update(protocol_nonce_ctx_t *ctx, uint16_t nonce);
  * MODE_SET         : uint8, 1 octet, valeur <= PROTOCOL_MODE_MAX. */
 bool protocol_parse_f32(const ecu_frame_t *frame, float *out);
 bool protocol_parse_mode(const ecu_frame_t *frame, uint8_t *out);
+
+/* Comme protocol_parse_f32, puis contrôle de plausibilité min <= v <= max.
+ * Distingue la trame malformée (INVALID : longueur, NaN/Inf) de la valeur
+ * bien formée mais hors bornes (OUT_OF_RANGE) pour les compter séparément.
+ * *out n'est écrit que si le résultat est PROTOCOL_VALUE_OK. */
+typedef enum {
+    PROTOCOL_VALUE_OK,
+    PROTOCOL_VALUE_INVALID,
+    PROTOCOL_VALUE_OUT_OF_RANGE,
+} protocol_value_status_t;
+
+protocol_value_status_t protocol_parse_f32_bounded(const ecu_frame_t *frame,
+                                                   float min, float max, float *out);
 
 #endif

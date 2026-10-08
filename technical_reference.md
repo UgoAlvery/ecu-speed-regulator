@@ -125,6 +125,16 @@ bool    protocol_nonce_check_and_update(protocol_nonce_ctx_t *ctx, uint16_t nonc
 #define PROTOCOL_MODE_MAX  2u
 bool    protocol_parse_f32(const ecu_frame_t *frame, float *out);    // len == 4, isfinite
 bool    protocol_parse_mode(const ecu_frame_t *frame, uint8_t *out); // len == 1, <= MODE_MAX
+
+// Bornes de plausibilité (km/h, inclusives)
+#define PROTOCOL_SETPOINT_MIN   0.0f
+#define PROTOCOL_SETPOINT_MAX   220.0f
+#define PROTOCOL_SPEED_MIN      0.0f
+#define PROTOCOL_SPEED_MAX      242.0f   // SETPOINT_MAX + 10 %
+typedef enum { PROTOCOL_VALUE_OK, PROTOCOL_VALUE_INVALID, PROTOCOL_VALUE_OUT_OF_RANGE }
+        protocol_value_status_t;
+protocol_value_status_t protocol_parse_f32_bounded(const ecu_frame_t *frame,
+                                                   float min, float max, float *out);
 ```
 
 **Règles** :
@@ -138,6 +148,10 @@ bool    protocol_parse_mode(const ecu_frame_t *frame, uint8_t *out); // len == 1
 - Validation applicative des payloads (`protocol_parse_*`) dans la lib pure, pas dans
   les tâches : longueur **exacte** du type (un payload trop long est aussi rejeté) et
   domaine de valeur. `*out` n'est jamais modifié en cas de rejet. Testé en host
+- Plausibilité (`protocol_parse_f32_bounded`) : `INVALID` (longueur, NaN/Inf) est distingué de
+  `OUT_OF_RANGE` (valeur bien formée hors bornes) → compteurs `rx_invalid` et
+  `rx_out_of_range`. task_control utilise les bornes SETPOINT / SPEED ; valeur rejetée →
+  dernière valeur valide conservée
 
 ---
 
@@ -382,7 +396,7 @@ et action de stress dédiée (rejeu de la dernière trame SPEED acceptée, cf. `
 
 ## Télémétrie STATS (0x83) — ordre du payload
 
-`TELEMETRY_STATS_COUNT = 11` × `uint32_t` little-endian = 44 octets, émis toutes les 1 s :
+`TELEMETRY_STATS_COUNT = 12` × `uint32_t` little-endian = 48 octets, émis toutes les 1 s :
 
 | # | Champ          | Écrivain unique   | Signification                                           |
 |---|----------------|-------------------|---------------------------------------------------------|
@@ -396,7 +410,8 @@ et action de stress dédiée (rejeu de la dernière trame SPEED acceptée, cf. `
 | 7 | `mode_refused` | task_control      | MODE_SET(AUTO) refusé : ligne failsafe GPIO ouverte (verrou) |
 | 8 | `mode_cmd_overwritten` | task_rx   | MODE_SET écrasé dans `queue_mode` avant lecture par task_control |
 | 9 | `alarm_dropped` | task_failsafe    | ALARM non mise en queue : `queue_tx` pleine malgré `SendToFront` |
-| 10 | `uptime_s`    | task_telemetry    | Secondes depuis le démarrage de task_telemetry          |
+| 10 | `rx_out_of_range` | task_control  | SETPOINT hors [0, 220] ou SPEED hors [0, 242] (bien formé, non plausible) |
+| 11 | `uptime_s`    | task_telemetry    | Secondes depuis le démarrage de task_telemetry          |
 
 `tx_dropped` a été ajouté lors de la RTA : `enqueue_output()` bloquait jusqu'à 10 ms
 sur `queue_tx` pleine, terme de blocage hors budget ±5 ms — désormais timeout 0 +
@@ -430,8 +445,9 @@ leur statut de libs pures.
 
 ```
 test/unit/test_runner.h    → harness minimal, sans dépendance externe
-test/unit/test_protocol.c  → 113 assertions (CRC, encode, decode, roundtrip, détection
-                              d'erreur, nonce anti-rejeu, validation des payloads)
+test/unit/test_protocol.c  → 134 assertions (CRC, encode, decode, roundtrip, détection
+                              d'erreur, nonce anti-rejeu, validation des payloads,
+                              bornes de plausibilité)
 test/unit/test_pid.c       → 41 assertions (init, reset, P/I/D, saturation, anti-windup,
                               entrées NaN/Inf)
 test/unit/test_failsafe_line.c → 34 assertions (latch, debounce, ligne ouverte au boot,
@@ -439,7 +455,7 @@ test/unit/test_failsafe_line.c → 34 assertions (latch, debounce, ligne ouverte
 test/unit/Makefile         → build natif, -fsanitize=address,undefined
 ```
 
-`make -C test/unit run` : build + exécution des trois suites. 188 assertions, 0 échec, aucun
+`make -C test/unit run` : build + exécution des trois suites. 209 assertions, 0 échec, aucun
 warning, aucun trigger ASan/UBSan.
 
 ---
@@ -484,7 +500,7 @@ couvre donc pas `protocol_nonce_check_and_update`, testée unitairement à la pl
 | Job              | Runner       | Contenu                                                        |
 |------------------|--------------|-----------------------------------------------------------------|
 | `firmware-build` | ubuntu-latest| `espressif/esp-idf-ci-action@v1` (image Docker ESP-IDF v5.3.5), `idf.py build` cible esp32 |
-| `hosted-tests`   | ubuntu-latest| `make -C test/unit run` — 188 assertions, ASan/UBSan                 |
+| `hosted-tests`   | ubuntu-latest| `make -C test/unit run` — 209 assertions, ASan/UBSan                 |
 | `fuzz-smoke`     | ubuntu-latest| build + corpus de départ + 30 s de fuzzing libFuzzer sur `protocol_decode`, artefacts uploadés si crash |
 
 `fuzz-smoke` n'est pas une campagne de fuzzing complète (voir section Fuzzing ci-dessus

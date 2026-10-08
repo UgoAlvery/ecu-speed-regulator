@@ -74,7 +74,7 @@ campagne de mesure et à repérer les termes qui comptent.
 |---|---|---|---|
 | MODE_SET | 1 o | 9 o | 0,78 ms |
 | SETPOINT / SPEED / OUTPUT | 4 o | 12 o | 1,04 ms |
-| STATS | 44 o (11 × u32, depuis D8) | 52 o | 4,51 ms |
+| STATS | 48 o (12 × u32, depuis D9) | 56 o | 4,86 ms |
 | ALARM « UART silence » | 27 o | 35 o | 3,04 ms |
 | ALARM « GPIO » (cause la plus longue, depuis D2) | 33 o | 41 o | 3,56 ms |
 
@@ -128,8 +128,8 @@ le §6 pour le chemin complet jusqu'à la trame sur le bus.
 ### `task_tx` et `task_telemetry`
 
 Ces deux tâches n'ont pas d'échéance dure. Le seul critère est l'absence de
-famine. La charge en émission est d'environ 172 o/s (10 × 12 + 52), soit
-1,49 % du lien, dans tous les modes depuis D7, ce qui laisse une marge très large. Les priorités 4 et 5
+famine. La charge en émission est d'environ 176 o/s (10 × 12 + 56), soit
+1,53 % du lien, dans tous les modes depuis D7, ce qui laisse une marge très large. Les priorités 4 et 5
 cumulent `C_fs/100 ms + C_ctrl/100 ms + 11 520 · C_rx` : tant que
 `C_rx < 86,8 µs`, la charge reste < 1 et `task_tx` progresse, même sous flood.
 
@@ -306,7 +306,7 @@ contenir jusqu'à **128 o** déjà écrits.
 
 - **ALARM (D8, `xQueueSendToFront`)** : elle passe devant tous les messages en
   attente. Restent devant elle la FIFO (≤ 128 o) et la trame que task_tx est
-  en train d'écrire (≤ 52 o, un STATS). Seule une autre ALARM postée en tête
+  en train d'écrire (≤ 56 o, un STATS). Seule une autre ALARM postée en tête
   *après* elle peut la doubler, et il y en a au plus une autre par épisode :
   silence UART puis ligne GPIO, ou l'inverse.
 - **OUTPUT(0)** (ajouté en queue) : au plus 7 messages devant, plus la FIFO.
@@ -314,9 +314,9 @@ contenir jusqu'à **128 o** déjà écrits.
 | Scénario | (2) Fin de l'ALARM (41 o) | (3) Fin de l'OUTPUT(0) (12 o), après le cycle |
 |---|---|---|
 | Nominal (queue et FIFO vides) | **3,6 ms** | **1,0 ms** |
-| Pessimiste, ALARM seule | 128 + 52 + 41 = 221 o → **19,2 ms** | — |
-| Pessimiste, une seconde ALARM la double | 128 + 52 + 41 + 41 = 262 o → **22,7 ms** | — |
-| Pessimiste (FIFO pleine, 7 messages de taille max = STATS 52 o) | (avant D8, en fin de file : 128 + 364 + 41 = 533 o → 46,3 ms) | 128 + 364 + 12 = 504 o → **43,8 ms** |
+| Pessimiste, ALARM seule | 128 + 56 + 41 = 225 o → **19,5 ms** | — |
+| Pessimiste, une seconde ALARM la double | 128 + 56 + 41 + 41 = 266 o → **23,1 ms** | — |
+| Pessimiste (FIFO pleine, 7 messages de taille max = STATS 56 o) | (avant D8, en fin de file : 128 + 392 + 41 = 561 o → 48,7 ms) | 128 + 392 + 12 = 532 o → **46,2 ms** |
 
 S'y ajoute l'interférence de `task_tx` par les tâches de priorité ≥ 4 pendant
 cette fenêtre (`C_ctrl`, `C_fs`, `C_rx` × octets reçus). Elle est finie tant
@@ -324,9 +324,9 @@ que `C_rx < 86,8 µs` (§5). ⏳ À mesurer : front GPIO4 → fin de trame ALARM
 et fin de la première trame OUTPUT(0) sur GPIO17.
 
 **Conclusion** : EF-05 (< 5 ms) porte sur **l'état interne**. L'ALARM est
-bornée séparément : **≤ 19,2 ms** de temps de ligne au pire (≤ 22,7 ms si une
+bornée séparément : **≤ 19,5 ms** de temps de ligne au pire (≤ 23,1 ms si une
 seconde ALARM la double), ~3,6 ms à vide. En fin de file (avant D8), elle
-aurait été de 46,3 ms avec les trames STATS actuelles. L'**arrêt physique** du moteur a lieu à la réception de
+aurait été de 48,7 ms avec les trames STATS actuelles. L'**arrêt physique** du moteur a lieu à la réception de
 l'OUTPUT(0) par l'actionneur : **≤ 100 ms + `R_ctrl` + temps de ligne**,
 soit ~101 ms en nominal. Avant D7, le failsafe postait lui-même un OUTPUT(0)
 (~1 ms en nominal). Le gain de D7 (écrivain unique, plus de course,

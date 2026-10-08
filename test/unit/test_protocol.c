@@ -586,6 +586,100 @@ static void test_parse_mode_null_args(void)
     TEST_ASSERT_FALSE(protocol_parse_mode(&f, NULL));
 }
 
+/* ========================================================================== */
+/* protocol_parse_f32_bounded — bornes de plausibilité                       */
+/* ========================================================================== */
+
+static protocol_value_status_t parse_bounded(float v, float min, float max, float *out)
+{
+    const ecu_frame_t f = make_frame(MSG_SETPOINT, &v, sizeof(v));
+    return protocol_parse_f32_bounded(&f, min, max, out);
+}
+
+static void test_bounded_setpoint_limits_inclusive(void)
+{
+    float out = -1.0f;
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_OK,
+        parse_bounded(PROTOCOL_SETPOINT_MIN, PROTOCOL_SETPOINT_MIN, PROTOCOL_SETPOINT_MAX, &out));
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, out);
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_OK,
+        parse_bounded(PROTOCOL_SETPOINT_MAX, PROTOCOL_SETPOINT_MIN, PROTOCOL_SETPOINT_MAX, &out));
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 220.0f, out);
+}
+
+static void test_bounded_setpoint_just_above_max_rejected(void)
+{
+    float out = 90.0f;
+    const float v = nextafterf(PROTOCOL_SETPOINT_MAX, INFINITY);
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_OUT_OF_RANGE,
+        parse_bounded(v, PROTOCOL_SETPOINT_MIN, PROTOCOL_SETPOINT_MAX, &out));
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 90.0f, out);   /* *out non modifié */
+}
+
+static void test_bounded_negative_rejected(void)
+{
+    float out = 90.0f;
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_OUT_OF_RANGE,
+        parse_bounded(-0.5f, PROTOCOL_SETPOINT_MIN, PROTOCOL_SETPOINT_MAX, &out));
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_OUT_OF_RANGE,
+        parse_bounded(-0.5f, PROTOCOL_SPEED_MIN, PROTOCOL_SPEED_MAX, &out));
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 90.0f, out);
+}
+
+static void test_bounded_speed_range(void)
+{
+    float out = 0.0f;
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_OK,
+        parse_bounded(242.0f, PROTOCOL_SPEED_MIN, PROTOCOL_SPEED_MAX, &out));
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 242.0f, out);
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_OUT_OF_RANGE,
+        parse_bounded(242.5f, PROTOCOL_SPEED_MIN, PROTOCOL_SPEED_MAX, &out));
+    /* Vitesse entre les deux bornes max : valide en SPEED, hors bornes en SETPOINT. */
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_OK,
+        parse_bounded(230.0f, PROTOCOL_SPEED_MIN, PROTOCOL_SPEED_MAX, &out));
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_OUT_OF_RANGE,
+        parse_bounded(230.0f, PROTOCOL_SETPOINT_MIN, PROTOCOL_SETPOINT_MAX, &out));
+}
+
+static void test_bounded_huge_value_out_of_range(void)
+{
+    float out = 0.0f;
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_OUT_OF_RANGE,
+        parse_bounded(1.0e6f, PROTOCOL_SETPOINT_MIN, PROTOCOL_SETPOINT_MAX, &out));
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_OUT_OF_RANGE,
+        parse_bounded(3.0e38f, PROTOCOL_SPEED_MIN, PROTOCOL_SPEED_MAX, &out));
+}
+
+/* Malformé ≠ hors bornes : NaN/Inf et mauvaise longueur restent INVALID. */
+static void test_bounded_nan_inf_are_invalid_not_out_of_range(void)
+{
+    float out = 0.0f;
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_INVALID,
+        parse_bounded(NAN, PROTOCOL_SETPOINT_MIN, PROTOCOL_SETPOINT_MAX, &out));
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_INVALID,
+        parse_bounded(INFINITY, PROTOCOL_SPEED_MIN, PROTOCOL_SPEED_MAX, &out));
+}
+
+static void test_bounded_wrong_length_invalid(void)
+{
+    const uint8_t p[3] = {0, 0, 0};
+    const ecu_frame_t f = make_frame(MSG_SPEED, p, sizeof(p));
+    float out = 0.0f;
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_INVALID,
+        protocol_parse_f32_bounded(&f, PROTOCOL_SPEED_MIN, PROTOCOL_SPEED_MAX, &out));
+}
+
+static void test_bounded_null_args_invalid(void)
+{
+    const float v = 10.0f;
+    const ecu_frame_t f = make_frame(MSG_SPEED, &v, sizeof(v));
+    float out;
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_INVALID,
+        protocol_parse_f32_bounded(NULL, 0.0f, 1.0f, &out));
+    TEST_ASSERT_EQUAL_INT(PROTOCOL_VALUE_INVALID,
+        protocol_parse_f32_bounded(&f, 0.0f, 100.0f, NULL));
+}
+
 int main(void)
 {
     TEST_SUITE_BEGIN("protocol");
@@ -654,6 +748,15 @@ int main(void)
     RUN_TEST(test_parse_mode_out_of_range_rejected);
     RUN_TEST(test_parse_mode_wrong_length_rejected);
     RUN_TEST(test_parse_mode_null_args);
+
+    RUN_TEST(test_bounded_setpoint_limits_inclusive);
+    RUN_TEST(test_bounded_setpoint_just_above_max_rejected);
+    RUN_TEST(test_bounded_negative_rejected);
+    RUN_TEST(test_bounded_speed_range);
+    RUN_TEST(test_bounded_huge_value_out_of_range);
+    RUN_TEST(test_bounded_nan_inf_are_invalid_not_out_of_range);
+    RUN_TEST(test_bounded_wrong_length_invalid);
+    RUN_TEST(test_bounded_null_args_invalid);
 
     TEST_SUITE_SUMMARY();
 }

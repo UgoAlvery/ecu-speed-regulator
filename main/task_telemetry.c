@@ -59,6 +59,7 @@ void task_telemetry(void *pvParameters)
         uint32_t mode_refused = task_control_get_count_mode_refused();
         uint32_t mode_overwr  = task_rx_get_count_mode_overwritten();
         uint32_t alarm_drop   = failsafe_get_count_alarm_dropped();
+        uint32_t rx_oor       = task_control_get_count_rx_out_of_range();
 
         uint8_t *p = s_payload;
         memcpy(p, &rx_valid,     sizeof(uint32_t)); p += sizeof(uint32_t);
@@ -71,6 +72,7 @@ void task_telemetry(void *pvParameters)
         memcpy(p, &mode_refused, sizeof(uint32_t)); p += sizeof(uint32_t);
         memcpy(p, &mode_overwr,  sizeof(uint32_t)); p += sizeof(uint32_t);
         memcpy(p, &alarm_drop,   sizeof(uint32_t)); p += sizeof(uint32_t);
+        memcpy(p, &rx_oor,       sizeof(uint32_t)); p += sizeof(uint32_t);
         memcpy(p, &uptime_s,     sizeof(uint32_t));
 
         const uint16_t payload_len =
