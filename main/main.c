@@ -18,6 +18,7 @@
 
 #define QUEUE_FRAMES_DEPTH   16u
 #define QUEUE_TX_DEPTH       8u
+#define QUEUE_MODE_DEPTH     1u   /* xQueueOverwrite exige une longueur de 1 */
 #define TASK_FAILSAFE_PRIORITY   5u
 #define TASK_RX_PRIORITY         4u
 #define TASK_CONTROL_PRIORITY    4u
@@ -34,6 +35,7 @@ static const char *TAG = "main";
 
 static QueueHandle_t     s_queue_frames = NULL;
 static QueueHandle_t     s_queue_tx     = NULL;
+static QueueHandle_t     s_queue_mode   = NULL;
 
 void app_main(void)
 {
@@ -45,9 +47,12 @@ void app_main(void)
     s_queue_tx = xQueueCreate(QUEUE_TX_DEPTH, sizeof(tx_message_t));
     configASSERT(s_queue_tx != NULL);
 
-    task_rx_init(s_queue_frames);
+    s_queue_mode = xQueueCreate(QUEUE_MODE_DEPTH, sizeof(ecu_mode_t));
+    configASSERT(s_queue_mode != NULL);
+
+    task_rx_init(s_queue_frames, s_queue_mode);
     task_tx_init(s_queue_tx);
-    task_control_init(s_queue_frames, s_queue_tx);
+    task_control_init(s_queue_frames, s_queue_mode, s_queue_tx);
     task_telemetry_init(s_queue_tx);
     failsafe_init(s_queue_tx);
 

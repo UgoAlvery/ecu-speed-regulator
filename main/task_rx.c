@@ -24,6 +24,7 @@ typedef struct {
 } frame_parser_t;
 
 static QueueHandle_t s_rx_queue;
+static QueueHandle_t s_mode_queue;   /* longueur 1, ecu_mode_t, xQueueOverwrite */
 static frame_parser_t s_parser;
 static protocol_nonce_ctx_t s_nonce_ctx;
 
@@ -31,6 +32,13 @@ static volatile uint32_t s_count_valid   = 0;
 static volatile uint32_t s_count_crc_err = 0;
 static volatile uint32_t s_count_dropped = 0;
 static volatile uint32_t s_count_replay  = 0;
+/* MODE_SET au payload invalide (longueur ≠ 1 ou valeur > PROTOCOL_MODE_MAX).
+ * Additionné par task_telemetry au compteur de task_control dans rx_invalid :
+ * deux compteurs à écrivain unique plutôt qu'un compteur à deux écrivains. */
+static volatile uint32_t s_count_mode_invalid     = 0;
+/* MODE_SET écrasé dans queue_mode avant d'avoir été lu par task_control
+ * (deux MODE_SET dans le même cycle de 100 ms : seul le dernier compte). */
+static volatile uint32_t s_count_mode_overwritten = 0;
 
 static void uart_init(void)
 {
@@ -118,9 +126,12 @@ static bool parser_feed_byte(frame_parser_t *p, const uint8_t byte, ecu_frame_t 
 
 // API
 
-void task_rx_init(const QueueHandle_t rx_queue)
+void task_rx_init(const QueueHandle_t rx_queue, const QueueHandle_t mode_queue)
 {
-    s_rx_queue = rx_queue;
+    configASSERT(rx_queue != NULL);
+    configASSERT(mode_queue != NULL);
+    s_rx_queue   = rx_queue;
+    s_mode_queue = mode_queue;
     parser_reset(&s_parser);
     protocol_nonce_ctx_init(&s_nonce_ctx);
     uart_init();
@@ -130,6 +141,31 @@ uint32_t task_rx_get_count_valid(void)   { return s_count_valid;   }
 uint32_t task_rx_get_count_crc_err(void) { return s_count_crc_err; }
 uint32_t task_rx_get_count_dropped(void) { return s_count_dropped; }
 uint32_t task_rx_get_count_replay(void)  { return s_count_replay;  }
+uint32_t task_rx_get_count_mode_invalid(void)     { return s_count_mode_invalid;     }
+uint32_t task_rx_get_count_mode_overwritten(void) { return s_count_mode_overwritten; }
+
+/* MODE_SET hors de queue_frames : sous flood, queue_frames pleine perdrait la
+ * trame la plus récente — potentiellement un MODE_SET(OFF). queue_mode, de
+ * longueur 1 et écrite par xQueueOverwrite, ne refuse jamais une écriture :
+ * le dernier MODE_SET reçu est toujours celui que task_control appliquera.
+ * Pas de prise de mutex_ecu_state ici (aucun nouveau terme de blocage) : le
+ * verrou failsafe est appliqué côté task_control (ecu_state_try_set_mode). */
+static void post_mode_request(const ecu_frame_t *frame)
+{
+    uint8_t raw_mode;
+    if (!protocol_parse_mode(frame, &raw_mode)) {
+        s_count_mode_invalid++;
+        return;
+    }
+
+    /* Compteur indicatif : task_control peut lire la queue entre ce test et
+     * l'écriture (sous-comptage d'au plus 1, sans effet sur le mode appliqué). */
+    if (uxQueueMessagesWaiting(s_mode_queue) == 1) {
+        s_count_mode_overwritten++;
+    }
+    const ecu_mode_t mode = (ecu_mode_t)raw_mode;
+    (void)xQueueOverwrite(s_mode_queue, &mode);   /* toujours pdPASS */
+}
 
 void task_rx(void *pvParameters) {
     (void)pvParameters;
@@ -152,7 +188,9 @@ void task_rx(void *pvParameters) {
                 } else {
                     s_count_valid++;
                     ecu_state_set_last_rx_tick(xTaskGetTickCount());
-                    if (xQueueSend(s_rx_queue, &frame, 0) != pdTRUE) {
+                    if (frame.type == MSG_MODE_SET) {
+                        post_mode_request(&frame);
+                    } else if (xQueueSend(s_rx_queue, &frame, 0) != pdTRUE) {
                         s_count_dropped++;
                     }
                 }

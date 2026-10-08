@@ -14,12 +14,14 @@
 #define UART_BAUD_RATE  115200
 #define RX_QUEUE_SIZE   16
 
-void task_rx_init(QueueHandle_t rx_queue);
+void task_rx_init(QueueHandle_t rx_queue, QueueHandle_t mode_queue);
 void task_rx(void *pvParameters);
 
 uint32_t task_rx_get_count_valid(void);
 uint32_t task_rx_get_count_crc_err(void);
 uint32_t task_rx_get_count_dropped(void);
 uint32_t task_rx_get_count_replay(void);
+uint32_t task_rx_get_count_mode_invalid(void);
+uint32_t task_rx_get_count_mode_overwritten(void);
 
 #endif /* ECU_TASK_RX_H */

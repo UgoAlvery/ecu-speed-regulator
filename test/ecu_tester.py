@@ -34,6 +34,7 @@ MSG_ALARM    = 0x85
 STATS_FIELDS = (
     'rx_valid', 'rx_crc_error', 'rx_dropped', 'rx_replay',
     'tx_output', 'tx_dropped', 'rx_invalid', 'mode_refused',
+    'mode_cmd_overwritten',
     'uptime_s',
 )
 STATS_SIZE = 4 * len(STATS_FIELDS)

@@ -197,6 +197,31 @@ mutex, avec le spinlock IDF. Ordre de grandeur : quelques µs. ⏳ à mesurer.
    est en plus sur UART2, donc une écriture console ne concurrence plus la
    FIFO TX de `task_tx`.
 
+### 4.4 `queue_mode` (D3) — impact nul sur les termes de blocage
+
+MODE_SET ne passe plus par `queue_frames` mais par `queue_mode` : queue
+FreeRTOS de longueur 1 contenant un `ecu_mode_t`, écrite par task_rx avec
+`xQueueOverwrite`, lue par task_control avec `xQueueReceive(…, 0)` en tout
+début de cycle.
+
+- **Ce n'est pas un mutex** : une opération de queue est une section critique
+  noyau (spinlock IDF) de durée constante, sans attente et sans héritage de
+  priorité. Aucune des deux opérations n'est bloquante (`xQueueOverwrite` ne
+  peut pas échouer, `xQueueReceive` a un timeout de 0).
+- **task_rx** : aucun nouvel accès à `mutex_ecu_state`. Son seul accès reste
+  `set_last_rx_tick` (§4.1). Il ne fait que valider le payload
+  (`protocol_parse_mode`, pur) et écraser la queue.
+- **task_control** : `+1` `xQueueReceive` non bloquant par cycle. La demande de
+  mode appliquée passe par `ecu_state_try_set_mode`, soit **une** section
+  critique de même durée que l'ancien `set_mode` du dispatch. Le nombre
+  d'accès au mutex par cycle est inchangé.
+- `B_ctrl` reste nul (aucune tâche moins prioritaire ne partage le mutex),
+  `B_fs` est inchangé par D3.
+- Latence d'application d'un MODE_SET : il est lu au début du cycle suivant,
+  soit **≤ 100 ms + `R_ctrl`**, bornée et indépendante de la charge sur
+  `queue_frames`. Deux MODE_SET dans le même cycle : seul le dernier est
+  appliqué (`mode_cmd_overwritten` dans STATS).
+
 ---
 
 ## 5. Cas `task_rx` / `task_control` à priorité égale (4)

@@ -68,7 +68,8 @@ dédiée serait du overhead sans bénéfice.
 
 | Primitive             | Nom               | Partagé entre                                           |
 |-----------------------|-------------------|---------------------------------------------------------|
-| Queue (ecu_frame_t)   | `queue_frames`    | task_rx → task_control                                  |
+| Queue (ecu_frame_t)   | `queue_frames`    | task_rx → task_control (SETPOINT, SPEED ; 16 places)    |
+| Queue (ecu_mode_t)    | `queue_mode`      | task_rx → task_control (MODE_SET ; 1 place, `xQueueOverwrite`) |
 | Queue (tx_message_t)  | `queue_tx`        | task_control, task_telemetry, task_failsafe → task_tx   |
 | Mutex (héritage prio) | `mutex_ecu_state` | task_rx, task_control, task_failsafe ↔ ecu_state        |
 | Sémaphore binaire     | `sem_failsafe`    | ISR GPIO → task_failsafe                                |
@@ -150,7 +151,7 @@ bool    protocol_parse_mode(const ecu_frame_t *frame, uint8_t *out); // len == 1
 #define RX_QUEUE_SIZE   16
 #define PARSER_TIMEOUT_MS 50   // reset parser si trame incomplète après 50ms
 
-void task_rx_init(QueueHandle_t rx_queue);
+void task_rx_init(QueueHandle_t rx_queue, QueueHandle_t mode_queue);
 void task_rx(void *pvParameters);
 
 // Accesseurs compteurs (lus par task_telemetry via ecu_state)
@@ -158,6 +159,8 @@ uint32_t task_rx_get_count_valid(void);
 uint32_t task_rx_get_count_crc_err(void);
 uint32_t task_rx_get_count_dropped(void);
 uint32_t task_rx_get_count_replay(void);
+uint32_t task_rx_get_count_mode_invalid(void);      // additionné à rx_invalid
+uint32_t task_rx_get_count_mode_overwritten(void);
 ```
 
 **Règles** :
@@ -176,6 +179,15 @@ uint32_t task_rx_get_count_replay(void);
   `frame_parser_t` — initialisé dans `task_rx_init`. Vérification du nonce **après**
   `protocol_decode()` (CRC/format déjà validés), **avant** l'envoi dans `queue_frames` :
   trame rejetée → `s_count_replay++`, pas d'enqueue, pas de blocage des trames suivantes
+- **MODE_SET → `queue_mode`, jamais `queue_frames`** (`rta_fmea.md` R-6) : validé par
+  `protocol_parse_mode` (invalide → `s_count_mode_invalid++`), puis
+  `xQueueOverwrite(queue_mode)` — n'échoue jamais, le dernier MODE_SET gagne. Si la queue
+  contenait déjà une demande non lue (`uxQueueMessagesWaiting == 1`) →
+  `s_count_mode_overwritten++` (indicatif : task_control peut lire entre le test et
+  l'écriture, sous-comptage d'au plus 1)
+- task_rx **ne prend pas de nouvel accès** à `mutex_ecu_state` pour MODE_SET : son seul
+  accès reste `set_last_rx_tick`. Le verrou failsafe (refus d'AUTO) est appliqué par
+  task_control via `ecu_state_try_set_mode`
 
 **Machine à états parser** :
 ```
@@ -363,7 +375,7 @@ et action de stress dédiée (rejeu de la dernière trame SPEED acceptée, cf. `
 
 ## Télémétrie STATS (0x83) — ordre du payload
 
-`TELEMETRY_STATS_COUNT = 9` × `uint32_t` little-endian = 36 octets, émis toutes les 1 s :
+`TELEMETRY_STATS_COUNT = 10` × `uint32_t` little-endian = 40 octets, émis toutes les 1 s :
 
 | # | Champ          | Écrivain unique   | Signification                                           |
 |---|----------------|-------------------|---------------------------------------------------------|
@@ -373,9 +385,10 @@ et action de stress dédiée (rejeu de la dernière trame SPEED acceptée, cf. `
 | 3 | `rx_replay`    | task_rx           | Nonce rejeté (rejeu / duplication / hors ordre)         |
 | 4 | `tx_output`    | task_tx           | Trames OUTPUT effectivement écrites sur l'UART          |
 | 5 | `tx_dropped`   | task_control      | OUTPUT non émis faute de place dans `queue_tx`          |
-| 6 | `rx_invalid`   | task_control      | Trame saine (CRC + nonce OK) rejetée au dispatch : longueur de payload ≠ taille du type, valeur non finie / hors domaine, type non attendu en RX |
+| 6 | `rx_invalid`   | task_control + task_rx (somme de deux compteurs) | Trame saine (CRC + nonce OK) rejetée au dispatch : longueur de payload ≠ taille du type, valeur non finie / hors domaine, type non attendu en RX |
 | 7 | `mode_refused` | task_control      | MODE_SET(AUTO) refusé : ligne failsafe GPIO ouverte (verrou) |
-| 8 | `uptime_s`     | task_telemetry    | Secondes depuis le démarrage de task_telemetry          |
+| 8 | `mode_cmd_overwritten` | task_rx   | MODE_SET écrasé dans `queue_mode` avant lecture par task_control |
+| 9 | `uptime_s`     | task_telemetry    | Secondes depuis le démarrage de task_telemetry          |
 
 `tx_dropped` a été ajouté lors de la RTA : `enqueue_output()` bloquait jusqu'à 10 ms
 sur `queue_tx` pleine, terme de blocage hors budget ±5 ms — désormais timeout 0 +

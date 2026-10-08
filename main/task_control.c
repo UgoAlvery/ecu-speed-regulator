@@ -18,7 +18,8 @@
 #define TAG               "CTRL"
 #define CONTROL_PERIOD_MS 100u
 
-static QueueHandle_t s_rx_queue = NULL;
+static QueueHandle_t s_rx_queue   = NULL;
+static QueueHandle_t s_mode_queue = NULL;
 static QueueHandle_t s_tx_queue = NULL;
 
 /* task_control est le seul écrivain de ce compteur (même exception structurelle
@@ -41,18 +42,22 @@ static volatile uint32_t s_count_rx_invalid = 0;
  * (verrou posé par task_failsafe, cf. ecu_state_try_set_mode). */
 static volatile uint32_t s_count_mode_refused = 0;
 
+static void apply_pending_mode(void);
 static void dispatch_pending_frames(void);
 static void dispatch_frame(const ecu_frame_t *frame);
 static void run_pid_and_emit(pid_t *pid);
 static bool enqueue_output(float output);
 
 
-void task_control_init(const QueueHandle_t rx_queue, const QueueHandle_t tx_queue)
+void task_control_init(const QueueHandle_t rx_queue, const QueueHandle_t mode_queue,
+                       const QueueHandle_t tx_queue)
 {
     configASSERT(rx_queue != NULL);
+    configASSERT(mode_queue != NULL);
     configASSERT(tx_queue != NULL);
-    s_rx_queue = rx_queue;
-    s_tx_queue = tx_queue;
+    s_rx_queue   = rx_queue;
+    s_mode_queue = mode_queue;
+    s_tx_queue   = tx_queue;
 }
 
 uint32_t task_control_get_count_tx_dropped(void) { return s_count_tx_dropped; }
@@ -81,6 +86,7 @@ void task_control(void *pvParameters)
 
     for (;;) {
         esp_task_wdt_reset();
+        apply_pending_mode();       /* avant queue_frames : un OFF n'attend rien */
         dispatch_pending_frames();
 
         const ecu_mode_t mode = ecu_state_get_mode();
@@ -104,6 +110,21 @@ void task_control(void *pvParameters)
  * Fonctions internes
  * ══════════════════════════════════════════════════════════════════════════ */
 
+/* MODE_SET arrive par queue_mode (longueur 1, écrasée par task_rx), jamais
+ * par queue_frames : lu sans bloquer en tout début de cycle. La transition
+ * (PID reset, commande à 0 hors AUTO) est ensuite faite par la boucle, sur
+ * changement de ecu_state_get_mode(). */
+static void apply_pending_mode(void)
+{
+    ecu_mode_t mode;
+    if (xQueueReceive(s_mode_queue, &mode, 0) == pdTRUE) {
+        if (!ecu_state_try_set_mode(mode)) {
+            s_count_mode_refused++;
+        }
+    }
+}
+
+
 static void dispatch_pending_frames(void)
 {
     ecu_frame_t frame;
@@ -117,8 +138,7 @@ static void dispatch_frame(const ecu_frame_t *frame)
 {
     /* Validation de longueur et de domaine dans protocol.c (lib pure, testée
      * en host). Valeur rejetée : la dernière valeur valide est conservée. */
-    float   val;
-    uint8_t raw_mode;
+    float val;
 
     switch (frame->type) {
 
@@ -133,16 +153,6 @@ static void dispatch_frame(const ecu_frame_t *frame)
     case MSG_SPEED:
         if (protocol_parse_f32(frame, &val)) {
             ecu_state_set_speed(val);
-        } else {
-            s_count_rx_invalid++;
-        }
-        break;
-
-    case MSG_MODE_SET:
-        if (protocol_parse_mode(frame, &raw_mode)) {
-            if (!ecu_state_try_set_mode((ecu_mode_t)raw_mode)) {
-                s_count_mode_refused++;
-            }
         } else {
             s_count_rx_invalid++;
         }

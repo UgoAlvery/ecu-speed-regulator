@@ -33,9 +33,11 @@ Le projet repose sur une architecture **multi-tâches FreeRTOS** strictement iso
                         ┌──────────────────────────────────────────┐
                         │                  ESP32                   │
                         │                                          │
-  [Script Python] ──UART──► task_rx                                │
-                        │      │ queue_frames                      │
-                        │      ▼                                   │
+  [Script Python] ──UART2─► task_rx                                │
+                        │      │ queue_frames   │ queue_mode (1,   │
+                        │      │ (SETPOINT,     │  MODE_SET,       │
+                        │      │  SPEED)        │  overwrite)      │
+                        │      ▼                ▼                  │
                         │   task_control ──► [queue_tx]            │
                         │   (dispatch +  │                         │
                         │    PID 100ms)  │                         │
@@ -46,7 +48,7 @@ Le projet repose sur une architecture **multi-tâches FreeRTOS** strictement iso
                         │   (timeout 2s +                          │
                         │    GPIO ISR)                             │
                         │                ▼                         │
-                        │            task_tx ──UART──► [Script Python] │
+                        │            task_tx ──UART2─► [Script Python] │
                         └──────────────────────────────────────────┘
 ```
 
@@ -66,10 +68,17 @@ Le projet repose sur une architecture **multi-tâches FreeRTOS** strictement iso
 
 | Ressource              | Type FreeRTOS | Producteur(s)                                     | Consommateur(s)                                   |
 |------------------------|---------------|---------------------------------------------------|---------------------------------------------------|
-| `queue_frames`         | Queue         | `task_rx`                                         | `task_control`                                    |
+| `queue_frames`         | Queue (16)    | `task_rx` (SETPOINT, SPEED)                       | `task_control`                                    |
+| `queue_mode`           | Queue (1), `xQueueOverwrite` | `task_rx` (MODE_SET)               | `task_control`                                    |
 | `queue_tx`             | Queue         | `task_control`, `task_telemetry`, `task_failsafe` | `task_tx`                                         |
-| `ecu_state_t`          | Mutex         | `task_control`, `task_failsafe`                   | `task_control`, `task_telemetry`, `task_failsafe` |
-| Compteurs statistiques | `volatile`    | `task_rx`                                         | `task_telemetry`                                  |
+| `ecu_state_t`          | Mutex         | `task_rx`, `task_control`, `task_failsafe`        | `task_control`, `task_failsafe`                   |
+| Compteurs statistiques | `volatile`, écrivain unique | `task_rx`, `task_tx`, `task_control` | `task_telemetry`                              |
+
+> **MODE_SET ne passe pas par `queue_frames`**. Sous flood, `queue_frames` pleine perd la trame
+> la plus récente — ce pouvait être un `MODE_SET(OFF)`. `queue_mode` (longueur 1, écrite par
+> `xQueueOverwrite`) n'échoue jamais : le dernier MODE_SET reçu est toujours appliqué, au début
+> du cycle de régulation suivant. Un MODE_SET écrasé avant lecture est compté
+> (`mode_cmd_overwritten`).
 
 ---
 
@@ -155,7 +164,7 @@ Un changement de mode est pris en compte **immédiatement** par `task_control`. 
 | EF-01 | Régulation périodique | OUTPUT émis toutes les **100 ms ± 5 ms** (jitter max) en mode AUTO                |
 | EF-02 | Algorithme PID        | PID discret avec anti-windup, sortie saturée dans `[0, 255]`                      |
 | EF-03 | Robustesse récepteur  | Trames malformées / incomplètes / invalides traitées sans blocage ni perte d'état |
-| EF-04 | Télémétrie            | STATS émis toutes les **1 s** : rx_valid, rx_crc_error, rx_dropped, rx_replay, tx_output, tx_dropped, rx_invalid, mode_refused, uptime_s |
+| EF-04 | Télémétrie            | STATS émis toutes les **1 s** : rx_valid, rx_crc_error, rx_dropped, rx_replay, tx_output, tx_dropped, rx_invalid, mode_refused, mode_cmd_overwritten, uptime_s |
 | EF-05 | Failsafe              | Déclenchement sur silence > 2 s **ou** ouverture de la ligne GPIO NC (réponse < 5 ms) |
 | EF-06 | Reprise failsafe      | Reprise en mode AUTO dès réception d'un nouveau `MODE_SET` valide, ligne GPIO fermée |
 
