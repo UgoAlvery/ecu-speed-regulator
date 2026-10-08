@@ -1,5 +1,6 @@
 #include "failsafe.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -9,12 +10,26 @@
 #include "freertos/task.h"
 
 #include "ecu_state.h"
+#include "failsafe_line.h"
 #include "protocol.h"
 #include "task_tx.h"
 
 
+/* Ligne failsafe en contact normalement fermé (NC) : jumper GPIO4 → GND,
+ * pull-up interne. Repos = 0, ouverture (jumper retiré OU fil coupé) = 1.
+ * Contrairement à un contact NO, la rupture du câblage est elle-même une
+ * demande de failsafe — plus de défaut latent (rta_fmea.md F-13). */
+#define LINE_OPEN_LEVEL          1
+#define POLLING_PERIOD_MS        100u
+
 static SemaphoreHandle_t s_sem_failsafe = NULL;
 static QueueHandle_t     s_tx_queue     = NULL;
+
+/* État local à task_failsafe (seul écrivain, seul lecteur). Le latch GPIO
+ * et l'anti-rebond de reprise sont dans failsafe_line.c (lib pure, testée
+ * en host) ; le déclenchement n'attend aucune stabilisation (EF-05). */
+static failsafe_line_t s_line;
+static bool            s_uart_latched = false;  /* failsafe silence UART actif */
 
 
 /* Émet une trame OUTPUT (payload brut, task_tx encode). Utilisé au failsafe
@@ -49,6 +64,13 @@ static void send_alarm(const char *cause)
 }
 
 
+static void update_led(void)
+{
+    gpio_set_level((gpio_num_t)FAILSAFE_LED_PIN,
+                   (s_line.latched || s_uart_latched) ? 1 : 0);
+}
+
+
 static void trigger_failsafe(const char *cause)
 {
     ecu_state_set_output(0.0f);
@@ -57,6 +79,57 @@ static void trigger_failsafe(const char *cause)
     send_motor_output(0.0f);   /* coupure moteur explicite et observable */
     send_alarm(cause);
 }
+
+
+/* Exécute l'action décidée par failsafe_line. TRIP n'est retourné qu'à la
+ * transition vers l'état failsafe : rebonds et niveaux à 1 répétés tombent
+ * sur le latch et n'émettent aucune nouvelle ALARM. */
+static void apply_line_action(const failsafe_line_action_t action, const char *cause)
+{
+    switch (action) {
+    case FAILSAFE_LINE_TRIP:
+        /* Verrou AVANT le passage en OFF : un MODE_SET(AUTO) concurrent est
+         * soit appliqué avant (puis écrasé par OFF), soit refusé. */
+        ecu_state_set_failsafe_locked(true);
+        trigger_failsafe(cause);
+        update_led();
+        break;
+    case FAILSAFE_LINE_UNLOCK:
+        ecu_state_set_failsafe_locked(false);   /* reprise EF-06 de nouveau possible */
+        update_led();
+        break;
+    case FAILSAFE_LINE_NONE:
+    default:
+        break;
+    }
+}
+
+
+static bool line_is_open(void)
+{
+    return gpio_get_level((gpio_num_t)FAILSAFE_GPIO_PIN) == LINE_OPEN_LEVEL;
+}
+
+
+static void poll_uart_silence(const TickType_t timeout_ticks)
+{
+    const ecu_mode_t current_mode = ecu_state_get_mode();
+
+    /* Fin du failsafe UART : reprise par MODE_SET valide (EF-06). */
+    if (s_uart_latched && current_mode != ECU_MODE_OFF) {
+        s_uart_latched = false;
+        update_led();
+    }
+
+    const TickType_t now       = xTaskGetTickCount();
+    const TickType_t last_tick = ecu_state_get_last_rx_tick();
+    if ((now - last_tick) >= timeout_ticks && current_mode != ECU_MODE_OFF) {
+        s_uart_latched = true;
+        trigger_failsafe("FAILSAFE: UART silence > 2s");
+        update_led();
+    }
+}
+
 
 static void IRAM_ATTR gpio_isr_handler(void *arg)
 {
@@ -72,22 +145,34 @@ static void IRAM_ATTR gpio_isr_handler(void *arg)
 void failsafe_init(QueueHandle_t tx_queue)
 {
     s_tx_queue = tx_queue;
+    failsafe_line_init(&s_line);
 
     s_sem_failsafe = xSemaphoreCreateBinary();
     configASSERT(s_sem_failsafe != NULL);
 
+    /* Front montant = ouverture du contact NC. */
     const gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << FAILSAFE_GPIO_PIN),
         .mode         = GPIO_MODE_INPUT,
         .pull_up_en   = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_ANYEDGE,
+        .intr_type    = GPIO_INTR_POSEDGE,
     };
     ESP_ERROR_CHECK(gpio_config(&io_conf));
 
+    const gpio_config_t led_conf = {
+        .pin_bit_mask = (1ULL << FAILSAFE_LED_PIN),
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&led_conf));
+    ESP_ERROR_CHECK(gpio_set_level((gpio_num_t)FAILSAFE_LED_PIN, 0));
+
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
 
-    ESP_ERROR_CHECK(gpio_isr_handler_add(FAILSAFE_GPIO_PIN,
+    ESP_ERROR_CHECK(gpio_isr_handler_add((gpio_num_t)FAILSAFE_GPIO_PIN,
                                          gpio_isr_handler, NULL));
 }
 
@@ -96,26 +181,47 @@ void task_failsafe( void *pvParameters)
 {
     (void)pvParameters;
 
-    const TickType_t polling_period = pdMS_TO_TICKS(100);
+    const TickType_t polling_period = pdMS_TO_TICKS(POLLING_PERIOD_MS);
     const TickType_t timeout_ticks  = pdMS_TO_TICKS(FAILSAFE_TIMEOUT_MS);
 
     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
+    /* Ligne déjà ouverte au démarrage (fil coupé avant le boot) : aucun front
+     * ne viendra jamais, seul le niveau le révèle. Les trames partent dès que
+     * task_tx tourne (queue_tx créée avant les tâches). */
+    if (line_is_open()) {
+        apply_line_action(failsafe_line_on_level(&s_line, true),
+                          "FAILSAFE: GPIO line open at boot");
+    }
+
+    TickType_t last_poll = xTaskGetTickCount();
+
     for (;;) {
         esp_task_wdt_reset();
-        const BaseType_t gpio_event = xSemaphoreTake(s_sem_failsafe, polling_period);
+
+        /* Attente bornée par la prochaine échéance de polling : une rafale de
+         * fronts ne décale pas le polling (période fixe de 100 ms). */
+        const TickType_t elapsed = xTaskGetTickCount() - last_poll;
+        const TickType_t wait    = (elapsed < polling_period)
+                                 ? (polling_period - elapsed) : 0;
+        const BaseType_t gpio_event = xSemaphoreTake(s_sem_failsafe, wait);
 
         if (gpio_event == pdTRUE) {
-            trigger_failsafe("FAILSAFE: GPIO error signal detected");
-        } else {
-            const TickType_t now       = xTaskGetTickCount();
-            const TickType_t last_tick = ecu_state_get_last_rx_tick();
-            if ((now - last_tick) >= timeout_ticks) {
-                const ecu_mode_t current_mode = ecu_state_get_mode();
-                if (current_mode != ECU_MODE_OFF) {
-                    trigger_failsafe("FAILSAFE: UART silence > 2s");
-                }
-            }
+            /* Premier front : déclenchement immédiat, sans attendre que le
+             * niveau soit stable. Les rebonds suivants retombent sur le
+             * latch et n'émettent rien. */
+            apply_line_action(failsafe_line_on_edge(&s_line),
+                              "FAILSAFE: GPIO line opened (edge)");
+        }
+
+        const TickType_t now = xTaskGetTickCount();
+        if ((now - last_poll) >= polling_period) {
+            last_poll = now;
+            /* Niveau relu à chaque poll : couvre un front manqué et gère
+             * le déverrouillage quand la ligne est refermée. */
+            apply_line_action(failsafe_line_on_level(&s_line, line_is_open()),
+                              "FAILSAFE: GPIO line open (level)");
+            poll_uart_silence(timeout_ticks);
         }
     }
 }

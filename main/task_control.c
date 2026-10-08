@@ -37,6 +37,10 @@ static volatile uint32_t s_count_tx_dropped = 0;
  * Même écrivain unique (task_control). */
 static volatile uint32_t s_count_rx_invalid = 0;
 
+/* MODE_SET(AUTO) refusés parce que la ligne failsafe GPIO est ouverte
+ * (verrou posé par task_failsafe, cf. ecu_state_try_set_mode). */
+static volatile uint32_t s_count_mode_refused = 0;
+
 static void dispatch_pending_frames(void);
 static void dispatch_frame(const ecu_frame_t *frame);
 static void run_pid_and_emit(pid_t *pid);
@@ -53,6 +57,7 @@ void task_control_init(const QueueHandle_t rx_queue, const QueueHandle_t tx_queu
 
 uint32_t task_control_get_count_tx_dropped(void) { return s_count_tx_dropped; }
 uint32_t task_control_get_count_rx_invalid(void) { return s_count_rx_invalid; }
+uint32_t task_control_get_count_mode_refused(void) { return s_count_mode_refused; }
 
 void task_control(void *pvParameters)
 {
@@ -135,7 +140,9 @@ static void dispatch_frame(const ecu_frame_t *frame)
 
     case MSG_MODE_SET:
         if (protocol_parse_mode(frame, &raw_mode)) {
-            ecu_state_set_mode((ecu_mode_t)raw_mode);
+            if (!ecu_state_try_set_mode((ecu_mode_t)raw_mode)) {
+                s_count_mode_refused++;
+            }
         } else {
             s_count_rx_invalid++;
         }

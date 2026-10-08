@@ -43,6 +43,7 @@ void ecu_state_init(void) {
     s_state.speed        = 0.0f;
     s_state.output       = 0.0f;
     s_state.last_rx_tick = 0;
+    s_state.failsafe_locked = false;
 
     ESP_LOGI(TAG, "initialized (mode=OFF)");
 }
@@ -84,6 +85,24 @@ void ecu_state_set_last_rx_tick(const TickType_t tick)
     LOCK();
     s_state.last_rx_tick = tick;
     UNLOCK();
+}
+
+void ecu_state_set_failsafe_locked(const bool locked)
+{
+    LOCK();
+    s_state.failsafe_locked = locked;
+    UNLOCK();
+}
+
+bool ecu_state_try_set_mode(const ecu_mode_t mode)
+{
+    LOCK_RET(false);
+    const bool refused = (mode == ECU_MODE_AUTO) && s_state.failsafe_locked;
+    if (!refused) {
+        s_state.mode = mode;
+    }
+    UNLOCK();
+    return !refused;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────── */

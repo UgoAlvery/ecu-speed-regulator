@@ -147,7 +147,7 @@ bloquant ni d'imbrication de verrou.
 |---|---|
 | `task_rx` | 1 (`set_last_rx_tick`) par trame valide |
 | `task_control` | 1 (`get_mode`) + 3 en AUTO (`get_setpoint`, `get_speed`, `set_output`) + 1 par trame dispatchée, + 1 en cas de transition de mode |
-| `task_failsafe` | 1 (`get_last_rx_tick`) + 1 (`get_mode`) au polling ; 2 (`set_output`, `set_mode`) au déclenchement |
+| `task_failsafe` | 2 au polling (`get_mode`, `get_last_rx_tick`) + 1 au déverrouillage (`set_failsafe_locked`) ; 3 au déclenchement GPIO (`set_failsafe_locked`, `set_output`, `set_mode`), 2 au déclenchement UART. Pire réveil : déclenchement sur front + poll dans la même itération = **5** |
 | `task_telemetry`, `task_tx` | 0 |
 
 `C_cs` désigne la durée d'une section critique : prise et restitution du
@@ -162,7 +162,7 @@ mutex, avec le spinlock IDF. Ordre de grandeur : quelques µs. ⏳ à mesurer.
   failsafe (prio 5) ne se bloque.
 - **Double cœur** : rx ou control, s'ils tournent sur l'autre cœur, peuvent
   reprendre le mutex *entre* deux accès de failsafe. Chaque accès peut donc
-  être bloqué : `B_fs ≤ 4 · C_cs` (4 accès au plus, au déclenchement). Cela
+  être bloqué : `B_fs ≤ 5 · C_cs` (5 accès au plus par réveil depuis D2). Cela
   reste négligeable devant 5 ms.
 - **Deadlock** : structurellement impossible. Il n'y a qu'un mutex, jamais
   pris de façon imbriquée, et aucun appel bloquant sous le mutex.
@@ -274,20 +274,25 @@ le temps « front → trame reçue » qui compte. Voir R-4.
 
 ### 6.2 Rebonds GPIO
 
-Le GPIO est configuré en `GPIO_INTR_ANYEDGE`, sans anti-rebond. Un bouton
-mécanique produit une rafale de fronts pendant 1 à 10 ms. Le sémaphore
-binaire fusionne les `Give`, si bien que failsafe ne s'exécute pas plus d'une
-fois par front. Mais chaque exécution déclenche `trigger_failsafe` et poste
-2 messages. Effets pendant la rafale :
+**Avant D2** : `GPIO_INTR_ANYEDGE`, sans anti-rebond. Chaque front d'une
+rafale de rebonds (1 à 10 ms) relançait `trigger_failsafe` et postait
+2 messages : `queue_tx` saturée d'ALARM redondantes, et le relâchement
+re-déclenchait aussi le failsafe.
 
-- interférence de priorité 5 sur control bornée par la durée de la rafale ;
-- `queue_tx` saturée d'ALARM redondantes, puis rejets silencieux (aucun
-  compteur côté failsafe) ;
-- le relâchement du bouton (front montant) re-déclenche aussi le failsafe.
+**Depuis D2** (contact NC, `GPIO_INTR_POSEDGE`, latch `failsafe_line.c`) :
 
-Effet sur la sûreté : aucun, l'état reste OFF. Effet sur la RTA :
-consommation non bornée a priori, bornée seulement par la physique du
-bouton. Voir R-5.
+- **une seule** ALARM par entrée en failsafe. Les fronts suivants réveillent
+  encore la tâche (le sémaphore binaire fusionne les `Give`), mais tombent
+  sur le latch : ~quelques µs par réveil, sans accès au mutex ni message ;
+- le polling garde sa période de 100 ms même sous rafale (attente bornée
+  par la prochaine échéance) ;
+- le déverrouillage exige 2 polls consécutifs ligne fermée, donc les
+  rebonds à la remise du jumper ne produisent ni déverrouillage prématuré ni
+  nouvelle ALARM.
+
+Interférence de priorité 5 sur control pendant une rafale : bornée par
+`n_fronts × C_fs_latch`, avec `C_fs_latch` ≪ `C_fs`. ⏳ À mesurer avec la
+sonde GPIO23 (§9) en retirant le jumper.
 
 ### 6.3 Chemin « silence UART »
 
@@ -317,7 +322,7 @@ de bruit ou de rejeux ne maintient pas l'ECU en vie. ✅
 | F-09 | Tâche bloquée (boucle infinie, attente sans fin) | Régulation ou supervision figée | ✅ **TWDT** (nouveau) : les 5 tâches sont abonnées, timeout de 2 s | Panic → reboot → mode OFF au boot | 4 | 1 | 1 | 4 | ~2 s + temps de boot sans commande. L'état au boot est sûr. |
 | F-10 | Débordement de pile | Corruption mémoire, comportement indéfini | Canary FreeRTOS (`CHECK_STACKOVERFLOW_CANARY`) | Panic → reboot | 4 | 1 | 2 | 8 | Marges non mesurées → R-8 |
 | F-11 | Deadlock du mutex | Tâches figées | TWDT | Impossible structurellement (§4.2) | 4 | 1 | 1 | 4 | — |
-| F-12 | Inversion de priorité | Failsafe retardé | — | Héritage de priorité, `B_fs ≤ 4·C_cs` | 3 | 1 | 2 | 6 | — |
+| F-12 | Inversion de priorité | Failsafe retardé | — | Héritage de priorité, `B_fs ≤ 5·C_cs` | 3 | 1 | 2 | 6 | — |
 | F-13 | Bouton failsafe : fil coupé, contact défectueux | Failsafe GPIO **indisponible** (pull-up → ligne haute en permanence) | **Aucune** (défaut latent) | Le timeout UART reste actif | 4 | 2 | 4 | **32** | **Plus forte criticité**. Contact normalement fermé (NC) + front montant = coupure → R-5 |
 | F-14 | Logs `ESP_LOG` sur UART0 | ASCII injecté dans le flux protocole, temps de blocage dans le cycle | Parser PC (resynchronisation sur 0xAA + CRC) | Pas de log sur le chemin de surcharge (corrigé) | 2 | 3 | 2 | 12 | Protocole à déplacer sur UART2 (GPIO16/17) → R-3 |
 | F-15 | Rebonds du bouton failsafe | Rafale de failsafes, `queue_tx` saturée | — | Sémaphore binaire (fusion des Give) | 1 | 3 | 2 | 6 | → R-5 |

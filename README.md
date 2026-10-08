@@ -155,9 +155,9 @@ Un changement de mode est pris en compte **immédiatement** par `task_control`. 
 | EF-01 | Régulation périodique | OUTPUT émis toutes les **100 ms ± 5 ms** (jitter max) en mode AUTO                |
 | EF-02 | Algorithme PID        | PID discret avec anti-windup, sortie saturée dans `[0, 255]`                      |
 | EF-03 | Robustesse récepteur  | Trames malformées / incomplètes / invalides traitées sans blocage ni perte d'état |
-| EF-04 | Télémétrie            | STATS émis toutes les **1 s** : rx_valid, rx_crc_error, rx_dropped, rx_replay, tx_output, tx_dropped, rx_invalid, uptime_s |
-| EF-05 | Failsafe              | Déclenchement sur silence > 2 s **ou** front GPIO externe (réponse < 5 ms)        |
-| EF-06 | Reprise failsafe      | Reprise en mode AUTO dès réception d'un nouveau `MODE_SET` valide                 |
+| EF-04 | Télémétrie            | STATS émis toutes les **1 s** : rx_valid, rx_crc_error, rx_dropped, rx_replay, tx_output, tx_dropped, rx_invalid, mode_refused, uptime_s |
+| EF-05 | Failsafe              | Déclenchement sur silence > 2 s **ou** ouverture de la ligne GPIO NC (réponse < 5 ms) |
+| EF-06 | Reprise failsafe      | Reprise en mode AUTO dès réception d'un nouveau `MODE_SET` valide, ligne GPIO fermée |
 
 ---
 
@@ -202,14 +202,28 @@ SETPOINT/SPEED non finis sont en plus rejetés dès le dispatch.
 Deux événements déclenchent le failsafe **indépendamment** :
 
 1. **Silence UART** — aucune trame valide reçue depuis **> 2 secondes**, détecté par `task_failsafe` via comparaison de `xTaskGetTickCount()` avec le dernier tick valide stocké dans `ecu_state`.
-2. **Front GPIO externe** — ISR qui donne un sémaphore binaire à `task_failsafe`, temps de réponse **< 5 ms** sur l'état interne (l'émission de l'ALARM sur la ligne dépend ensuite de `task_tx`, cf. [`rta_fmea.md`](rta_fmea.md) §6).
+2. **Ligne failsafe GPIO ouverte** — contact **normalement fermé** : un jumper relie en
+   permanence GPIO4 à GND (pull-up interne). Retirer le jumper **ou couper le fil** fait passer
+   l'entrée à 1 : la rupture du câblage est elle-même une demande d'arrêt, il n'existe plus de
+   défaut latent. Détection :
+   - **front montant** → ISR → sémaphore binaire → `task_failsafe`, déclenchement dès le premier
+     front, sans attente de stabilisation (réponse **< 5 ms** sur l'état interne ; l'émission de
+     l'ALARM sur la ligne dépend ensuite de `task_tx`, cf. [`rta_fmea.md`](rta_fmea.md) §6) ;
+   - **niveau** relu au boot et à chaque polling (100 ms) : une ligne déjà ouverte avant le
+     démarrage, qui ne produira jamais de front, est détectée (ALARM « line open at boot »).
 
-Actions au déclenchement (atomiques) :
+Actions au déclenchement :
 - Commande moteur forcée à `0`
 - Passage en mode `OFF`
-- Émission immédiate d'un message `ALARM (0x85)` avec cause identifiée en clair
+- Émission d'un message `ALARM (0x85)` avec cause identifiée en clair — **une seule fois par
+  entrée en failsafe** : les rebonds et fronts suivants n'en produisent pas d'autre
+- LED GPIO25 allumée tant que le failsafe est actif
 
-**Reprise** : réception d'un message `MODE_SET` valide relance l'ECU normalement depuis n'importe quel mode.
+**Reprise** (EF-06) : réception d'un message `MODE_SET` valide. **Exception** : tant que la ligne
+GPIO est ouverte, le failsafe reste verrouillé — un `MODE_SET(AUTO)` est refusé et compté
+(`mode_refused` dans STATS). Le verrou se lève quand la ligne est relue fermée sur 2 polls
+consécutifs (100–200 ms, anti-rebond à la remise du jumper) ; un nouveau `MODE_SET(AUTO)` est
+alors nécessaire.
 
 **Dernier rempart** : si une tâche (y compris `task_failsafe`) se bloque, le Task Watchdog
 ESP-IDF déclenche un reboot au bout de 2 s ; l'ECU redémarre en mode `OFF`, commande 0.
@@ -235,7 +249,8 @@ ecu/
     ├── ecu_state.h / .c        ← État partagé (mode, setpoint, speed, output, last_rx_tick)
     ├── protocol.h / .c         ← encode_frame, decode_frame, compute_crc — lib pure sans état
     ├── pid.h / .c              ← Calcul PID discret — lib pure sans état global
-    ├── failsafe.h / .c         ← task_failsafe + ISR GPIO
+    ├── failsafe.h / .c         ← task_failsafe + ISR GPIO + LED
+    ├── failsafe_line.h / .c    ← Machine à états ligne NC (latch, anti-rebond) — lib pure
     ├── task_rx.h / .c          ← Lecture UART + parser état machine
     ├── task_control.h / .c     ← Dispatch trames + boucle PID 100 ms
     ├── task_tx.h / .c          ← Émission série protégée mutex
@@ -278,7 +293,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 ### Tests automatisés (sans matériel)
 
 ```bash
-make -C test/unit run                 # 154 assertions protocol.c + pid.c (ASan/UBSan)
+make -C test/unit run                 # 188 assertions protocol.c, pid.c, failsafe_line.c (ASan/UBSan)
 make -C test/fuzz fuzz SECONDS=60     # fuzzing libFuzzer de protocol_decode
 ```
 
@@ -297,3 +312,6 @@ Exécutés à chaque push par la CI GitHub Actions, avec le build firmware ESP-I
 pip install pyserial
 python test/ecu_tester.py   # SERIAL_PORT = adaptateur USB-TTL (UART2), pas le port USB de la carte
 ```
+
+> Le jumper failsafe GPIO4 → GND doit être en place : sans lui, l'ECU démarre en failsafe
+> verrouillé, refuse `MODE_SET(AUTO)` (STATS `mode_refused` qui monte) et n'émet aucun OUTPUT.

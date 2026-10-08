@@ -9,6 +9,7 @@ idf_component_register(
         "task_control.c"
         "task_telemetry.c"
         "failsafe.c"
+        "failsafe_line.c"
         INCLUDE_DIRS "."
         REQUIRES driver
 )

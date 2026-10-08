@@ -1,3 +1,4 @@
 test_protocol
 test_pid
+test_failsafe_line
 *.o

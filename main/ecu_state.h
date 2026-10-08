@@ -5,6 +5,7 @@
 #ifndef ECU_ECU_STATE_H
 #define ECU_ECU_STATE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -21,6 +22,7 @@ typedef struct {
     float      speed;
     float      output;
     TickType_t last_rx_tick;
+    bool       failsafe_locked;  /* ligne failsafe GPIO ouverte : AUTO interdit */
 } ecu_state_t;
 
 void ecu_state_init(void);
@@ -30,6 +32,14 @@ void ecu_state_set_setpoint(float setpoint);
 void ecu_state_set_speed(float speed);
 void ecu_state_set_output(float output);
 void ecu_state_set_last_rx_tick(TickType_t tick);
+void ecu_state_set_failsafe_locked(bool locked);
+
+/* Seule écriture conditionnelle de l'état : refuse ECU_MODE_AUTO tant que
+ * failsafe_locked est vrai, test et écriture sous la MÊME prise de mutex.
+ * Deux appels séparés (get_failsafe_locked puis set_mode) laisseraient
+ * task_failsafe verrouiller entre les deux et l'AUTO passerait quand même.
+ * Retourne false si la demande est refusée (état inchangé). */
+bool ecu_state_try_set_mode(ecu_mode_t mode);
 
 ecu_mode_t ecu_state_get_mode(void);
 float      ecu_state_get_setpoint(void);

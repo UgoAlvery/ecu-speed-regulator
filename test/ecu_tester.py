@@ -33,7 +33,7 @@ MSG_ALARM    = 0x85
 # section « Télémétrie STATS ». Toute modification côté firmware se reporte ici.
 STATS_FIELDS = (
     'rx_valid', 'rx_crc_error', 'rx_dropped', 'rx_replay',
-    'tx_output', 'tx_dropped', 'rx_invalid',
+    'tx_output', 'tx_dropped', 'rx_invalid', 'mode_refused',
     'uptime_s',
 )
 STATS_SIZE = 4 * len(STATS_FIELDS)

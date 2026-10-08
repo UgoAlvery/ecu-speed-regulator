@@ -18,7 +18,8 @@ board_pins.h        → brochage ESP32 #1, source unique des numéros de GPIO
 ecu_state.h / .c    → état partagé centralisé (accès sous mutex)
 protocol.h / .c     → lib pure sans état global (encode, decode, CRC)
 pid.h / .c          → lib pure sans état global (struct pid_t passée en paramètre)
-failsafe.h / .c     → task_failsafe + ISR GPIO
+failsafe.h / .c     → task_failsafe + ISR GPIO + LED d'état
+failsafe_line.h/.c  → machine à états de la ligne NC (latch, anti-rebond) — lib pure
 task_rx.h / .c      → UART init + parser état machine + compteurs RX
 task_control.h / .c → dispatch trames + boucle PID 100 ms
 task_tx.h / .c      → émission UART (seul écrivain UART, seul encodeur)
@@ -207,6 +208,7 @@ typedef struct {
     float      speed;
     float      output;
     TickType_t last_rx_tick;   // pour le failsafe timeout 2s
+    bool       failsafe_locked; // ligne failsafe GPIO ouverte : AUTO interdit
 } ecu_state_t;
 
 void       ecu_state_init(void);
@@ -216,6 +218,9 @@ void       ecu_state_set_speed(float speed);
 void       ecu_state_set_setpoint(float setpoint);
 void       ecu_state_set_output(float output);
 void       ecu_state_set_last_rx_tick(TickType_t tick);
+void       ecu_state_set_failsafe_locked(bool locked);
+// Écriture conditionnelle atomique : refuse AUTO si failsafe_locked
+bool       ecu_state_try_set_mode(ecu_mode_t mode);
 // Getters (prennent le mutex en interne)
 ecu_mode_t ecu_state_get_mode(void);
 float      ecu_state_get_speed(void);
@@ -228,6 +233,13 @@ TickType_t ecu_state_get_last_rx_tick(void);
 - Mutex créé dans `ecu_state_init()`, appelée dans `app_main` avant les tâches
 - Chaque setter/getter prend et relâche le mutex — pas d'exposition du mutex
 - Pas de getter/setter combiné pour éviter les races entre read-modify-write
+- **Exception assumée : `ecu_state_try_set_mode`**. Le verrou failsafe impose une règle
+  « AUTO interdit si verrouillé ». Faite par l'appelant (`get` puis `set`), elle serait
+  elle-même un read-modify-write : task_failsafe pourrait verrouiller entre les deux et
+  l'AUTO passerait. Le test et l'écriture sont donc faits sous **une seule** prise du
+  mutex, dans ecu_state — même durée de section critique qu'un setter
+- Ordre côté failsafe : `set_failsafe_locked(true)` **avant** `set_mode(OFF)` — un
+  `try_set_mode(AUTO)` concurrent est soit appliqué avant puis écrasé par OFF, soit refusé
 
 ---
 
@@ -267,7 +279,7 @@ valeur valide conservée).
 ## Module failsafe.h / .c — ✅ implémenté
 
 ```c
-#define FAILSAFE_GPIO_PIN      GPIO_NUM_4   // bouton vers GND, pull-up interne
+// FAILSAFE_GPIO_PIN (4) et FAILSAFE_LED_PIN (25) : board_pins.h
 #define FAILSAFE_TIMEOUT_MS    2000
 #define FAILSAFE_RESPONSE_MS   5
 
@@ -276,14 +288,27 @@ void task_failsafe(void *pvParameters);
 ```
 
 **Règles** :
+- Ligne en **contact normalement fermé** : jumper GPIO4 → GND, pull-up interne.
+  Repos = 0, ouverture (jumper retiré ou fil coupé) = 1. Interruption
+  `GPIO_INTR_POSEDGE` (ouverture)
 - ISR GPIO → `xSemaphoreGiveFromISR(sem_failsafe)`
-- task_failsafe bloquée sur `xSemaphoreTake(sem_failsafe, pdMS_TO_TICKS(100))`
-- En parallèle, polling du last_rx_tick toutes les 100 ms
-- Au déclenchement : ecu_state → OFF, output=0, puis OUTPUT(0) et ALARM dans
-  queue_tx (timeout 0)
-- Reprise : task_control détecte MODE_SET → revalide le mode normalement
-- Interruption configurée en `GPIO_INTR_ANYEDGE`, sans anti-rebond (appui **et**
-  relâchement déclenchent) — cf. `rta_fmea.md` §6.2 et R-5
+- task_failsafe bloquée sur `xSemaphoreTake(sem_failsafe, <temps restant jusqu'au
+  prochain poll>)` : polling à période fixe de 100 ms même sous rafale de fronts
+- À chaque poll : niveau de GPIO4 relu (ligne déjà ouverte, front manqué,
+  déverrouillage) + contrôle du last_rx_tick
+- Au boot (début de task_failsafe) : niveau relu ; ligne ouverte → failsafe immédiat,
+  ALARM « GPIO line open at boot »
+- Latch et anti-rebond dans `failsafe_line.c` (lib pure, testée en host) :
+  `TRIP` au premier front ou niveau ouvert, puis `NONE` tant que verrouillé (une seule
+  ALARM par entrée en failsafe) ; `UNLOCK` après 2 polls consécutifs ligne fermée
+- Au déclenchement GPIO : `set_failsafe_locked(true)`, puis ecu_state → output=0,
+  OFF, puis OUTPUT(0) et ALARM dans queue_tx (timeout 0), LED GPIO25 allumée
+- Silence UART : même séquence sans verrou ; fin du failsafe UART quand le mode
+  quitte OFF (reprise EF-06)
+- LED GPIO25 = failsafe GPIO actif **ou** failsafe UART actif ; seul task_failsafe
+  l'écrit
+- Reprise : MODE_SET appliqué via `ecu_state_try_set_mode` — AUTO refusé tant que
+  `failsafe_locked`, compteur `mode_refused` (STATS)
 - EF-05 (< 5 ms) tenue pour l'état interne (OFF, output=0) ; l'annonce
   OUTPUT(0)/ALARM sur la ligne passe par task_tx (prio 3) et n'est pas bornée à
   5 ms sous charge — cf. `rta_fmea.md` §6.1
@@ -338,7 +363,7 @@ et action de stress dédiée (rejeu de la dernière trame SPEED acceptée, cf. `
 
 ## Télémétrie STATS (0x83) — ordre du payload
 
-`TELEMETRY_STATS_COUNT = 8` × `uint32_t` little-endian = 32 octets, émis toutes les 1 s :
+`TELEMETRY_STATS_COUNT = 9` × `uint32_t` little-endian = 36 octets, émis toutes les 1 s :
 
 | # | Champ          | Écrivain unique   | Signification                                           |
 |---|----------------|-------------------|---------------------------------------------------------|
@@ -349,7 +374,8 @@ et action de stress dédiée (rejeu de la dernière trame SPEED acceptée, cf. `
 | 4 | `tx_output`    | task_tx           | Trames OUTPUT effectivement écrites sur l'UART          |
 | 5 | `tx_dropped`   | task_control      | OUTPUT non émis faute de place dans `queue_tx`          |
 | 6 | `rx_invalid`   | task_control      | Trame saine (CRC + nonce OK) rejetée au dispatch : longueur de payload ≠ taille du type, valeur non finie / hors domaine, type non attendu en RX |
-| 7 | `uptime_s`     | task_telemetry    | Secondes depuis le démarrage de task_telemetry          |
+| 7 | `mode_refused` | task_control      | MODE_SET(AUTO) refusé : ligne failsafe GPIO ouverte (verrou) |
+| 8 | `uptime_s`     | task_telemetry    | Secondes depuis le démarrage de task_telemetry          |
 
 `tx_dropped` a été ajouté lors de la RTA : `enqueue_output()` bloquait jusqu'à 10 ms
 sur `queue_tx` pleine, terme de blocage hors budget ±5 ms — désormais timeout 0 +
@@ -378,7 +404,7 @@ Détail des marges par tâche : `rta_fmea.md` §8.
 
 ## Tests hébergés (host) — ✅ implémenté
 
-`protocol.c` et `pid.c` sont testés nativement (GCC, sans ESP-IDF/FreeRTOS), profitant de
+`protocol.c`, `pid.c` et `failsafe_line.c` sont testés nativement (GCC, sans ESP-IDF/FreeRTOS), profitant de
 leur statut de libs pures.
 
 ```
@@ -387,10 +413,12 @@ test/unit/test_protocol.c  → 113 assertions (CRC, encode, decode, roundtrip, d
                               d'erreur, nonce anti-rejeu, validation des payloads)
 test/unit/test_pid.c       → 41 assertions (init, reset, P/I/D, saturation, anti-windup,
                               entrées NaN/Inf)
+test/unit/test_failsafe_line.c → 34 assertions (latch, debounce, ligne ouverte au boot,
+                              déverrouillage anti-rebond)
 test/unit/Makefile         → build natif, -fsanitize=address,undefined
 ```
 
-`make -C test/unit run` : build + exécution des deux suites. 154 assertions, 0 échec, aucun
+`make -C test/unit run` : build + exécution des trois suites. 188 assertions, 0 échec, aucun
 warning, aucun trigger ASan/UBSan.
 
 ---
@@ -435,7 +463,7 @@ couvre donc pas `protocol_nonce_check_and_update`, testée unitairement à la pl
 | Job              | Runner       | Contenu                                                        |
 |------------------|--------------|-----------------------------------------------------------------|
 | `firmware-build` | ubuntu-latest| `espressif/esp-idf-ci-action@v1` (image Docker ESP-IDF v5.3.5), `idf.py build` cible esp32 |
-| `hosted-tests`   | ubuntu-latest| `make -C test/unit run` — 154 assertions, ASan/UBSan                 |
+| `hosted-tests`   | ubuntu-latest| `make -C test/unit run` — 188 assertions, ASan/UBSan                 |
 | `fuzz-smoke`     | ubuntu-latest| build + corpus de départ + 30 s de fuzzing libFuzzer sur `protocol_decode`, artefacts uploadés si crash |
 
 `fuzz-smoke` n'est pas une campagne de fuzzing complète (voir section Fuzzing ci-dessus
