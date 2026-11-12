@@ -9,6 +9,7 @@ idf_component_register(
         "task_tx.c"
         "task_control.c"
         "task_telemetry.c"
+        "task_timing.c"
         "failsafe.c"
         "failsafe_line.c"
         INCLUDE_DIRS "."

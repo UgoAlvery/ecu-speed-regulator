@@ -3,6 +3,7 @@
 #include "ecu_state.h"
 #include "pid.h"
 #include "protocol.h"
+#include "task_timing.h"
 #include "task_tx.h"
 
 #include "freertos/FreeRTOS.h"
@@ -90,6 +91,7 @@ void task_control(void *pvParameters)
 
     for (;;) {
         esp_task_wdt_reset();
+        timing_record_control_tick();
         apply_pending_mode();       /* avant queue_frames : un OFF n'attend rien */
         dispatch_pending_frames();
 

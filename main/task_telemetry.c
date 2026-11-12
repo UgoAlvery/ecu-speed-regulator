@@ -17,6 +17,7 @@
 #include "protocol.h"
 #include "ecu_state.h"
 #include "task_rx.h"
+#include "task_timing.h"
 #include "task_tx.h"
 #include "task_control.h"
 #include "failsafe.h"
@@ -37,8 +38,9 @@ void task_telemetry(void *pvParameters)
     configASSERT(s_tx_queue != NULL);
     static uint8_t s_payload[TELEMETRY_STATS_COUNT * sizeof(uint32_t)];
 
-    TickType_t last_wake = xTaskGetTickCount();
-    uint32_t   uptime_s  = 0U;
+    TickType_t last_wake    = xTaskGetTickCount();
+    uint32_t   uptime_s     = 0U;
+    uint32_t   timing_ticks = 0U;
 
     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
@@ -47,6 +49,10 @@ void task_telemetry(void *pvParameters)
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(TELEMETRY_PERIOD_MS));
         esp_task_wdt_reset();
         uptime_s++;
+        timing_ticks++;
+        if (timing_ticks % TIMING_CSV_PERIOD_S == 0u) {
+            timing_print_csv();
+        }
 
         uint32_t rx_valid     = task_rx_get_count_valid();
         uint32_t rx_crc_error = task_rx_get_count_crc_err();

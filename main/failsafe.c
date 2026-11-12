@@ -12,6 +12,7 @@
 #include "ecu_state.h"
 #include "failsafe_line.h"
 #include "protocol.h"
+#include "task_timing.h"
 #include "task_tx.h"
 
 
@@ -78,9 +79,11 @@ static void update_led(void)
  * ensuite en tête de queue. lock : verrou anti-AUTO (ligne GPIO). */
 static void trigger_failsafe(const char *cause, const bool lock)
 {
+    timing_record_failsafe_trigger();
     if (!ecu_state_enter_failsafe(lock, task_tx_emit_output, s_tx_queue)) {
         s_count_output_dropped++;
     }
+    timing_record_failsafe_done();
     send_alarm(cause);
 }
 
@@ -129,6 +132,10 @@ static void poll_uart_silence(const TickType_t timeout_ticks)
     const TickType_t last_tick = ecu_state_get_last_rx_tick();
     if ((now - last_tick) >= timeout_ticks && current_mode != ECU_MODE_OFF) {
         s_uart_latched = true;
+        /* Record observed silence (ticks → µs) before changing state. */
+        const long long silence_us =
+            (long long)(now - last_tick) * portTICK_PERIOD_MS * 1000LL;
+        timing_record_heartbeat_silence_us(silence_us);
         trigger_failsafe("FAILSAFE: UART silence > 2s", false);
         update_led();
     }
