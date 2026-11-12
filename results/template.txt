@@ -1,0 +1,49 @@
+ECU tester report
+=================
+Date       : YYYY-MM-DD HH:MM
+Firmware   : git rev = <git rev-parse --short HEAD>
+Platform   : ESP32, ESP-IDF v5.3
+Port       : /dev/ttyUSBx (USB-TTL, UART2)
+Operator   : <name>
+
+--- Phase 1: Normal operation (30 s) ---
+OUTPUT received          : TODO
+Mean OUTPUT period (ms)  : TODO
+Max OUTPUT gap (ms)      : TODO   # must be ≤ 300 ms (EM-01)
+STATS uptime_s           : TODO
+
+--- Phase 2: Stress test ---
+rx_crc_error after flood : TODO
+rx_replay after flood    : TODO
+rx_dropped after flood   : TODO
+queue_tx overflows       : TODO   # tx_dropped in STATS
+
+--- Phase 3: Post-stress recovery ---
+OUTPUT resumed after (ms): TODO
+PID active (mode=AUTO)   : YES / NO
+
+--- Phase 4: Failsafe (2.5 s silence) ---
+Time to OUTPUT=0 (ms)    : TODO   # from last valid RX to first OUTPUT=0 received
+ALARM received           : YES / NO
+ALARM cause string       : TODO
+
+--- Phase 5: Signal de vie (whole session) ---
+max_output_gap (ms)      : TODO   # must be ≤ 300 ms (EM-01)
+Session duration (s)     : TODO
+
+--- task_timing CSV (from idf.py monitor) ---
+loop_jitter_min_us       : TODO
+loop_jitter_avg_us       : TODO
+loop_jitter_p99_us       : TODO
+loop_jitter_max_us       : TODO
+loop_samples             : TODO
+failsafe_sw_latency_us   : TODO
+heartbeat_silence_us     : TODO
+
+--- Pass / Fail ---
+EF-01 (OUTPUT 100ms±5ms) : PASS / FAIL
+EF-05 (failsafe <5ms SW) : PASS / FAIL
+EM-01 (gap ≤300ms)       : PASS / FAIL
+Overall                  : PASS / FAIL
+
+--- Notes ---
