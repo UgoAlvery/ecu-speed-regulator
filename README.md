@@ -355,3 +355,89 @@ python test/ecu_tester.py   # SERIAL_PORT = adaptateur USB-TTL (UART2), pas le p
 
 > Le jumper failsafe GPIO4 → GND doit être en place : sans lui, l'ECU démarre en failsafe
 > verrouillé, refuse `MODE_SET(AUTO)` (STATS `mode_refused` qui monte) et n'émet aucun OUTPUT.
+
+---
+
+## Résultats de qualité (hôte, 2026-11-12)
+
+### Tests et couverture
+
+| Module | Tests | Assertions | Lignes couvertes | Branches couvertes |
+|---|---|---|---|---|
+| `protocol.c` | 68 | 134 | 100 % (74/74) | 98 % (63/64 prises) |
+| `pid.c` | 27 | 41 | 100 % (40/40) | — |
+| `failsafe_line.c` | 13 | 34 | 100 % (24/24) | — |
+| `ecu_command.c` | 14 | 61 | 100 % (27/27) | — |
+| **Total** | **122** | **270** | **100 %** | — |
+
+Commande : `make -C test/unit run` (gcc -Wall -Wextra -Wpedantic, ASan/UBSan)
+
+La seule branche non prise dans `protocol.c` est l'entrée d'un payload nul
+avec `payload_len > 0` (combinaison impossible par construction).
+
+### Sanitizers
+
+ASan + UBSan activés dans `test/unit/Makefile`. Résultat : **0 erreur** sur les 270
+assertions. Commande identique à ci-dessus.
+
+### Fuzzing (libFuzzer, `protocol_decode`)
+
+| Paramètre | Valeur |
+|---|---|
+| Durée | 601 s (~10 min) |
+| Exécutions | 457 071 196 |
+| Corpus initial | 45 seeds (gen_seeds) |
+| Couverture atteinte | 36 features / 70 feature-points (stable) |
+| Crashs / timeouts | **0** |
+| Findings | 0 fichier dans `test/fuzz/findings/` |
+
+Commande : `make -C test/fuzz fuzz SECONDS=600`
+
+### Analyse statique
+
+| Outil | Résultat sur les libs portables |
+|---|---|
+| gcc -Wall -Wextra -Wpedantic -Werror | **0 warning** |
+| cppcheck --enable=warning,performance,portability | 0 vrai problème (uniquement `unusedFunction` supprimé : attendu pour des libs testées en isolation) |
+| clang-tidy clang-analyzer-\* | 3 occurrences `insecureAPI.DeprecatedOrUnsafeBufferHandling` sur `memcpy` : **faux positifs** (appels bornés par `PROTOCOL_MAX_PAYLOAD_SIZE`, sans variante `_s` sur cible embarquée) |
+
+### Mesures cible (campagne à faire)
+
+**Aucune mesure matérielle n'a été effectuée.** Le module `main/task_timing.c`
+est prêt ; les valeurs seront collectées lors de la campagne sur l'ESP32 physique
+et consignées dans `results/` (voir `results/template.txt`). Voir aussi
+`docs/fault_table.md` pour les colonnes "Measured time" à remplir.
+
+---
+
+## Méthode de mesure et limites
+
+### Ce qui a été mesuré
+
+| Métrique | Méthode | Outillage |
+|---|---|---|
+| Nombre d'assertions | `make -C test/unit run` | gcc + test_runner.h custom |
+| Couverture de lignes/branches | `gcov -b` sur binaires de test compilés avec `--coverage` | gcc + gcov |
+| Sanitizers | `-fsanitize=address,undefined` dans le Makefile de test | gcc ASan/UBSan |
+| Fuzzing | libFuzzer `-max_total_time=600`, seed corpus 45 trames | clang -fsanitize=fuzzer,address,undefined |
+| Analyse statique | `cppcheck --error-exitcode=1`, `clang-tidy clang-analyzer-*` | cppcheck 2.13 / clang-tidy 18 |
+
+### Ce qui n'a pas été mesuré (matériel non disponible)
+
+- **Jitter de boucle** (task_control, 100 ms) — sonde prête : `timing_record_control_tick()`
+- **Latence logicielle du failsafe** — sonde prête : `timing_record_failsafe_trigger/done()`
+- **Temps de détection de silence UART** — sonde prête : `timing_record_heartbeat_silence_us()`
+- **WCET réel** des tâches — aucun instrument cycle-accurate disponible sur hôte
+- **Charge bus UART** sous flood réel
+
+### Limites des mesures logicielles
+
+- `esp_timer_get_time()` a une résolution de 1 µs mais une précision dépendante
+  de la fréquence d'horloge de l'ESP32 (± quelques µs à 240 MHz).
+- Le jitter mesuré inclut la latence du scheduler FreeRTOS et du TWDT reset,
+  pas uniquement le code applicatif.
+- Les mesures sont logicielles, **pas électriques** : elles ne couvrent ni
+  la latence de transmission UART (≈ 87 µs/octet à 115 200 bauds), ni la
+  latence de l'actionneur physique.
+- La couverture de code à 100 % ne garantit pas l'absence de bugs sur les chemins
+  de timing réel (concurrence FreeRTOS, ISR, priorités).
