@@ -17,3 +17,8 @@ cmake-build-release/
 # Python
 __pycache__/
 *.pyc
+
+# Office documents — keep reports out of VCS
+*.docx
+*.xlsx
+*.pptx
