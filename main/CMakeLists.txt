@@ -12,6 +12,7 @@ idf_component_register(
         "task_timing.c"
         "failsafe.c"
         "failsafe_line.c"
+        "hal_encoder_esp32.c"
         INCLUDE_DIRS "."
         REQUIRES driver
 )

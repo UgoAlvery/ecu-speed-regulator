@@ -6,6 +6,11 @@
 #include "task_timing.h"
 #include "task_tx.h"
 
+#if ECU_USE_ENCODER_SPEED
+#include "hal_encoder.h"
+#include "hal_config.h"
+#endif
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -62,6 +67,9 @@ void task_control_init(const QueueHandle_t rx_queue, const QueueHandle_t mode_qu
     s_rx_queue   = rx_queue;
     s_mode_queue = mode_queue;
     s_tx_queue   = tx_queue;
+#if ECU_USE_ENCODER_SPEED
+    configASSERT(hal_encoder_init());
+#endif
 }
 
 uint32_t task_control_get_count_tx_dropped(void) { return s_count_tx_dropped; }
@@ -192,7 +200,11 @@ static float compute_requested_output(pid_t *pid, const ecu_mode_t mode)
         return 0.0f;
     }
     const float setpoint = ecu_state_get_setpoint();
-    const float speed    = ecu_state_get_speed();
+#if ECU_USE_ENCODER_SPEED
+    const float speed = hal_encoder_get_speed_kmh(CONTROL_PERIOD_MS / 1000.0f);
+#else
+    const float speed = ecu_state_get_speed();
+#endif
     return pid_compute(pid, setpoint, speed);
 }
 
