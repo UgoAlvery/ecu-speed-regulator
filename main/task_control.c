@@ -26,8 +26,11 @@
 #include "esp_task_wdt.h"
 
 
-#define TAG               "CTRL"
-#define CONTROL_PERIOD_MS 100u
+#define TAG                      "CTRL"
+#define CONTROL_PERIOD_MS        100u
+/* Defense-in-depth: disable PWM if no valid RX frame received for this long
+ * while in AUTO mode. Must be < FAILSAFE_TIMEOUT_MS (2000 ms). */
+#define CTRL_SILENCE_GUARD_MS    1500u
 
 static QueueHandle_t s_rx_queue   = NULL;
 static QueueHandle_t s_mode_queue = NULL;
@@ -76,6 +79,10 @@ void task_control_init(const QueueHandle_t rx_queue, const QueueHandle_t mode_qu
     s_tx_queue   = tx_queue;
 #if ECU_USE_ENCODER_SPEED
     configASSERT(hal_encoder_init());
+#endif
+#if ECU_DRIVE_HW_PWM
+    configASSERT(hal_pwm_init());
+    configASSERT(hal_pwm_enable()); /* requires -DHWPROTECTION_CONFIRMED=true */
 #endif
 }
 
@@ -230,14 +237,25 @@ static void emit_output(const float requested)
         s_count_tx_dropped++;
     }
 #if ECU_DRIVE_HW_PWM
-    /* Map PID output [0, PID_DEFAULT_OUT_MAX] to duty [0, 10000].
-     * hal_pwm_set_duty_pct is a no-op when PWM is disabled (failsafe path). */
+    /* Defense-in-depth: disable PWM if no valid frame received for 1.5 s
+     * while in AUTO mode (task_failsafe fires at 2 s — this is earlier).
+     * Uses uint32 subtraction which wraps correctly for windows << 49 days. */
     {
-        const float norm = requested / PID_DEFAULT_OUT_MAX;
-        const uint16_t duty = (uint16_t)(norm > 1.0f ? 10000u
-                                       : (norm < 0.0f ? 0u
-                                       : (uint16_t)(norm * 10000.0f)));
-        hal_pwm_set_duty_pct(duty);
+        const TickType_t now     = xTaskGetTickCount();
+        const TickType_t last_rx = ecu_state_get_last_rx_tick();
+        const bool silence = (ecu_state_get_mode() == ECU_MODE_AUTO) &&
+                             ((TickType_t)(now - last_rx) >
+                              pdMS_TO_TICKS(CTRL_SILENCE_GUARD_MS));
+        if (silence) {
+            hal_pwm_disable();
+        } else {
+            /* Map PID output [0, PID_DEFAULT_OUT_MAX] to duty [0, 10000] */
+            const float norm = requested / PID_DEFAULT_OUT_MAX;
+            const uint16_t duty = (norm > 1.0f) ? 10000u
+                                : (norm < 0.0f) ? 0u
+                                : (uint16_t)(norm * 10000.0f);
+            hal_pwm_set_duty_pct(duty);
+        }
     }
 #endif
 }
