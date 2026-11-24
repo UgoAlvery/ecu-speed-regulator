@@ -332,7 +332,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 ### Tests automatisés (sans matériel)
 
 ```bash
-make -C test/unit run                 # 270 assertions protocol.c, pid.c, failsafe_line.c, ecu_command.c (ASan/UBSan)
+make -C test/unit run                 # 349 assertions protocol.c, pid.c, failsafe_line.c, ecu_command.c (ASan/UBSan)
 make -C test/fuzz fuzz SECONDS=60     # fuzzing libFuzzer de protocol_decode
 ```
 
@@ -368,7 +368,7 @@ python test/ecu_tester.py   # SERIAL_PORT = adaptateur USB-TTL (UART2), pas le p
 | `pid.c` | 27 | 41 | 100 % (40/40) | — |
 | `failsafe_line.c` | 13 | 34 | 100 % (24/24) | — |
 | `ecu_command.c` | 14 | 61 | 100 % (27/27) | — |
-| **Total** | **122** | **270** | **100 %** | — |
+| **Total** | **122** | **349** | **100 %** | — |
 
 Commande : `make -C test/unit run` (gcc -Wall -Wextra -Wpedantic, ASan/UBSan)
 
