@@ -22,7 +22,7 @@ jobs:
           path: '.'
 
   hosted-tests:
-    name: Tests hébergés (protocol.c, pid.c)
+    name: Tests hébergés (protocol, pid, failsafe_line, ecu_command)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
