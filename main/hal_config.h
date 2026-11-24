@@ -16,17 +16,27 @@
 /* ── Encoder parameters ────────────────────────────────────────────────────
  * TODO(datasheet): measure or look up FIT0522 encoder resolution and the
  * gearbox ratio printed on the motor label.
- * Speed conversion returns 0.0 km/h until both values are non-zero. */
+ * Speed conversion returns 0.0 km/h until both values are non-zero.
+ * Use #ifndef so that -DHAL_ENC_PULSES_PER_MOTOR_REV=N at compile time
+ * (e.g. for host tests) overrides these defaults without redefinition warnings. */
+#ifndef HAL_ENC_PULSES_PER_MOTOR_REV
 #define HAL_ENC_PULSES_PER_MOTOR_REV  0u   /* TODO(datasheet) FIT0522 */
+#endif
+#ifndef HAL_ENC_GEAR_RATIO
 #define HAL_ENC_GEAR_RATIO            0u   /* TODO(datasheet) FIT0522 */
+#endif
 
 /* Wheel circumference in metres for km/h conversion.
  * TODO(datasheet): measure wheel + tyre fitted to the test bench. */
+#ifndef HAL_ENC_WHEEL_CIRC_M
 #define HAL_ENC_WHEEL_CIRC_M          0.0f /* TODO(datasheet) */
+#endif
 
 /* Guard: CPR * gear must fit in uint32_t (the formula uses uint64_t cast, but
- * float precision is lost above ~16M). Fires only when both are non-zero. */
-#if HAL_ENC_PULSES_PER_MOTOR_REV != 0 && HAL_ENC_GEAR_RATIO != 0
+ * float precision is lost above ~16M). Fires only when both are non-zero.
+ * Define HAL_ENC_SKIP_STATIC_ASSERT to suppress (host tests with extreme values). */
+#if HAL_ENC_PULSES_PER_MOTOR_REV != 0 && HAL_ENC_GEAR_RATIO != 0 && \
+    !defined(HAL_ENC_SKIP_STATIC_ASSERT)
 _Static_assert(
     (uint64_t)HAL_ENC_PULSES_PER_MOTOR_REV * HAL_ENC_GEAR_RATIO <= UINT32_MAX,
     "HAL_ENC_PULSES_PER_MOTOR_REV * HAL_ENC_GEAR_RATIO overflows uint32_t"

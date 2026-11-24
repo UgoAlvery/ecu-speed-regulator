@@ -8,8 +8,20 @@ on:
 
 jobs:
   firmware-build:
-    name: Build firmware (ESP-IDF v5.3, target esp32)
+    name: Build firmware (${{ matrix.name }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "default"
+            cmake_args: ""
+          - name: "ECU_DRIVE_HW_PWM"
+            cmake_args: "-DECU_DRIVE_HW_PWM=ON"
+          - name: "ECU_DRIVE_HW_PWM+ENCODER"
+            cmake_args: "-DECU_DRIVE_HW_PWM=ON -DECU_USE_ENCODER_SPEED=ON"
+          - name: "ECU_DRIVE_HW_PWM+ENCODER+HW_CONFIRMED"
+            cmake_args: "-DECU_DRIVE_HW_PWM=ON -DECU_USE_ENCODER_SPEED=ON -DHW_PROTECTION_CONFIRMED=ON"
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -20,6 +32,7 @@ jobs:
           esp_idf_version: v5.3.5
           target: esp32
           path: '.'
+          cmake_build_args: ${{ matrix.cmake_args }}
 
   hosted-tests:
     name: Tests hébergés (protocol, pid, failsafe_line, ecu_command)

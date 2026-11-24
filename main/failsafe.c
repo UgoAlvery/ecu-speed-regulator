@@ -9,9 +9,11 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "ctrl_heartbeat.h"
 #include "ecu_state.h"
 #include "failsafe_line.h"
 #include "protocol.h"
+#include "task_control.h"
 #include "task_timing.h"
 #include "task_tx.h"
 
@@ -25,8 +27,11 @@
  * pull-up interne. Repos = 0, ouverture (jumper retiré OU fil coupé) = 1.
  * Contrairement à un contact NO, la rupture du câblage est elle-même une
  * demande de failsafe — plus de défaut latent (rta_fmea.md F-13). */
-#define LINE_OPEN_LEVEL          1
-#define POLLING_PERIOD_MS        100u
+#define LINE_OPEN_LEVEL             1
+#define POLLING_PERIOD_MS           100u
+/* Fires if task_control heartbeat does not change for this long.
+ * Must be < FAILSAFE_TIMEOUT_MS (2000 ms) and > CONTROL_PERIOD_MS (100 ms). */
+#define CTRL_HEARTBEAT_TIMEOUT_MS   500u
 
 static SemaphoreHandle_t s_sem_failsafe = NULL;
 static QueueHandle_t     s_tx_queue     = NULL;
@@ -36,6 +41,11 @@ static QueueHandle_t     s_tx_queue     = NULL;
  * en host) ; le déclenchement n'attend aucune stabilisation (EF-05). */
 static failsafe_line_t s_line;
 static bool            s_uart_latched = false;  /* failsafe silence UART actif */
+
+/* Heartbeat state: task_control increments s_control_heartbeat every loop.
+ * task_failsafe tracks the last seen value and the tick when it changed. */
+static uint32_t   s_last_heartbeat      = 0;
+static TickType_t s_last_heartbeat_tick = 0;
 
 /* ALARM non mises en queue faute de place (queue_tx pleine, 8 messages).
  * Écrivain unique task_failsafe, lu par task_telemetry (STATS). */
@@ -123,6 +133,23 @@ static void apply_line_action(const failsafe_line_action_t action, const char *c
 static bool line_is_open(void)
 {
     return gpio_get_level((gpio_num_t)FAILSAFE_GPIO_PIN) == LINE_OPEN_LEVEL;
+}
+
+
+static void poll_control_heartbeat(void)
+{
+    const uint32_t   hb         = task_control_get_heartbeat();
+    const TickType_t now        = xTaskGetTickCount();
+    const uint32_t   elapsed_ms =
+        (uint32_t)((now - s_last_heartbeat_tick) * portTICK_PERIOD_MS);
+
+    if (ctrl_heartbeat_frozen(hb, s_last_heartbeat, elapsed_ms, CTRL_HEARTBEAT_TIMEOUT_MS)) {
+        trigger_failsafe("FAILSAFE: task_control heartbeat frozen", false);
+        s_last_heartbeat_tick = now; /* avoid re-triggering every poll */
+    } else if (hb != s_last_heartbeat) {
+        s_last_heartbeat      = hb;
+        s_last_heartbeat_tick = now;
+    }
 }
 
 
@@ -217,6 +244,7 @@ void task_failsafe( void *pvParameters)
     }
 
     TickType_t last_poll = xTaskGetTickCount();
+    s_last_heartbeat_tick = last_poll; /* grace period: task_control may not have started yet */
 
     for (;;) {
         esp_task_wdt_reset();
@@ -244,6 +272,7 @@ void task_failsafe( void *pvParameters)
             apply_line_action(failsafe_line_on_level(&s_line, line_is_open()),
                               "FAILSAFE: GPIO line open (level)");
             poll_uart_silence(timeout_ticks);
+            poll_control_heartbeat();
         }
     }
 }

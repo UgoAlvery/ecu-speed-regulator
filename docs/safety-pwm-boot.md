@@ -44,5 +44,10 @@ du fusible de protection et de la diode de roue libre (1N5822).
 |---|---|---|
 | Boot / reset | LEDC duty = 0 après `hal_pwm_init()` | Pull-down 10 kΩ force Vgs = 0 |
 | Failsafe GPIO | `hal_pwm_disable()` → duty = 0 | Pull-down maintient l'état |
-| Silence UART | `hal_pwm_disable()` → duty = 0 | Pull-down maintient l'état |
-| Garde silence ctrl | `hal_pwm_disable()` à 1500 ms | Pull-down maintient l'état |
+| Silence UART (> 2 s) | `hal_pwm_disable()` → duty = 0 | Pull-down maintient l'état |
+| Heartbeat figé (> 500 ms) | `hal_pwm_disable()` via `task_failsafe` | Pull-down maintient l'état |
+| Garde silence ctrl (> 1500 ms) | `hal_pwm_disable()` secondaire si task_control tourne | Pull-down maintient l'état |
+
+> **Priorités des tâches** : `task_failsafe` (5) > `task_control` (4). Un blocage de
+> `task_control` ne peut pas bloquer `task_failsafe`. La garde heartbeat dans
+> `task_failsafe` détecte le gel de `task_control` en ≤ 500 ms.

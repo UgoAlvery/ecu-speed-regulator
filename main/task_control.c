@@ -30,6 +30,9 @@
 #define CONTROL_PERIOD_MS        100u
 /* Defense-in-depth: disable PWM if no valid RX frame received for this long
  * while in AUTO mode. Must be < FAILSAFE_TIMEOUT_MS (2000 ms). */
+/* Primary heartbeat guard runs in task_failsafe (ctrl_heartbeat.h): fires even
+ * if this task blocks. This secondary guard fires if the task runs but receives
+ * no valid frame. Must be < FAILSAFE_TIMEOUT_MS (2000 ms). */
 #define CTRL_SILENCE_GUARD_MS    1500u
 
 static QueueHandle_t s_rx_queue   = NULL;
@@ -61,6 +64,10 @@ static volatile uint32_t s_count_rx_out_of_range = 0;
  * (verrou posé par task_failsafe, cf. ecu_state_try_set_mode). */
 static volatile uint32_t s_count_mode_refused = 0;
 
+/* Incremented at the top of every loop iteration; monitored by task_failsafe.
+ * volatile: written by task_control, read by task_failsafe (different tasks). */
+static volatile uint32_t s_control_heartbeat = 0;
+
 static void apply_pending_mode(void);
 static void dispatch_pending_frames(void);
 static void dispatch_frame(const ecu_frame_t *frame);
@@ -90,6 +97,7 @@ uint32_t task_control_get_count_tx_dropped(void) { return s_count_tx_dropped; }
 uint32_t task_control_get_count_rx_invalid(void) { return s_count_rx_invalid; }
 uint32_t task_control_get_count_mode_refused(void) { return s_count_mode_refused; }
 uint32_t task_control_get_count_rx_out_of_range(void) { return s_count_rx_out_of_range; }
+uint32_t task_control_get_heartbeat(void) { return s_control_heartbeat; }
 
 void task_control(void *pvParameters)
 {
@@ -112,6 +120,7 @@ void task_control(void *pvParameters)
     ESP_LOGI(TAG, "task_control démarrée, période %u ms", CONTROL_PERIOD_MS);
 
     for (;;) {
+        s_control_heartbeat++;
         esp_task_wdt_reset();
         timing_record_control_tick();
         apply_pending_mode();       /* avant queue_frames : un OFF n'attend rien */

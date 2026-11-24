@@ -55,5 +55,5 @@ float hal_encoder_get_speed_kmh(float dt_s)
         / (float)((uint64_t)HAL_ENC_PULSES_PER_MOTOR_REV *
                   (uint64_t)HAL_ENC_GEAR_RATIO)
         / dt_s;
-    return output_revs_per_s * HAL_ENC_WHEEL_CIRC_M * 3600.0f;
+    return output_revs_per_s * HAL_ENC_WHEEL_CIRC_M * 3.6f;
 }

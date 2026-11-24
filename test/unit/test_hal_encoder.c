@@ -54,15 +54,17 @@ static void test_get_count_before_init_returns_zero(void)
     TEST_ASSERT_EQUAL_INT(0, hal_encoder_get_count());
 }
 
+#if !defined(HAL_ENC_TEST_REALISTIC) && !defined(HAL_ENC_TEST_OVERFLOW)
+/* Only meaningful when HAL_ENC_PULSES_PER_MOTOR_REV == 0 (default TODO state). */
 static void test_speed_returns_zero_when_pulses_per_rev_is_zero(void)
 {
-    /* HAL_ENC_PULSES_PER_MOTOR_REV == 0 in hal_config.h (TODO(datasheet)). */
     reset();
     hal_encoder_init();
     hal_encoder_mock_set_count(1000);
     const float speed = hal_encoder_get_speed_kmh(0.1f);
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, speed);
 }
+#endif
 
 static void test_speed_returns_zero_when_dt_is_zero(void)
 {
@@ -108,6 +110,57 @@ static void test_cpr_gear_product_no_overflow(void)
     TEST_ASSERT_TRUE(extreme > (uint64_t)UINT32_MAX);
 }
 
+/* ── Tests with real HAL constants (compiled only when non-zero) ───────────
+ * HAL_ENC_TEST_REALISTIC: -DHAL_ENC_PULSES_PER_MOTOR_REV=64u
+ *                          -DHAL_ENC_GEAR_RATIO=120u
+ *                          -DHAL_ENC_WHEEL_CIRC_M=0.314f
+ * HAL_ENC_TEST_OVERFLOW:  -DHAL_ENC_PULSES_PER_MOTOR_REV=65536u
+ *                          -DHAL_ENC_GEAR_RATIO=65537u
+ *                          -DHAL_ENC_WHEEL_CIRC_M=0.314f */
+
+#ifdef HAL_ENC_TEST_REALISTIC
+
+static void test_speed_one_full_output_revolution(void)
+{
+    /* count = CPR * gear → exactly 1 output rev/s at dt=1.0 s */
+    reset();
+    hal_encoder_init();
+    hal_encoder_mock_set_count(
+        (int32_t)HAL_ENC_PULSES_PER_MOTOR_REV * (int32_t)HAL_ENC_GEAR_RATIO);
+    const float speed = hal_encoder_get_speed_kmh(1.0f);
+    /* 1 rev/s × HAL_ENC_WHEEL_CIRC_M m × 3.6 = km/h */
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, HAL_ENC_WHEEL_CIRC_M * 3.6f, speed);
+}
+
+static void test_speed_half_revolution(void)
+{
+    reset();
+    hal_encoder_init();
+    hal_encoder_mock_set_count(
+        (int32_t)HAL_ENC_PULSES_PER_MOTOR_REV * (int32_t)HAL_ENC_GEAR_RATIO / 2);
+    const float speed = hal_encoder_get_speed_kmh(1.0f);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, HAL_ENC_WHEEL_CIRC_M * 3.6f * 0.5f, speed);
+}
+
+#endif /* HAL_ENC_TEST_REALISTIC */
+
+#ifdef HAL_ENC_TEST_OVERFLOW
+
+static void test_speed_no_overflow_extreme_cpr(void)
+{
+    /* count = CPR value (fits in int32_t: 65536).
+     * Correct   (uint64_t): 65536/(65536×65537)/1.0 × 0.314 × 3.6 ≈ 1.72e-5 km/h
+     * Overflow (uint32_t): 65536/65536       /1.0 × 0.314 × 3.6 = 1.1304  km/h (1000× too high)
+     * This test fails without the uint64_t cast in the speed formula. */
+    reset();
+    hal_encoder_init();
+    hal_encoder_mock_set_count(HAL_ENC_PULSES_PER_MOTOR_REV); /* = 65536 */
+    const float speed = hal_encoder_get_speed_kmh(1.0f);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.0f, speed); /* must be nearly 0, not ~1.1 km/h */
+}
+
+#endif /* HAL_ENC_TEST_OVERFLOW */
+
 int main(void)
 {
     TEST_SUITE_BEGIN("hal_encoder (mock)");
@@ -116,10 +169,19 @@ int main(void)
     RUN_TEST(test_get_count_negative);
     RUN_TEST(test_reset_clears_count);
     RUN_TEST(test_get_count_before_init_returns_zero);
+#if !defined(HAL_ENC_TEST_REALISTIC) && !defined(HAL_ENC_TEST_OVERFLOW)
     RUN_TEST(test_speed_returns_zero_when_pulses_per_rev_is_zero);
+#endif
     RUN_TEST(test_speed_returns_zero_when_dt_is_zero);
     RUN_TEST(test_speed_returns_zero_when_dt_is_negative);
     RUN_TEST(test_speed_resets_count_after_reading);
     RUN_TEST(test_cpr_gear_product_no_overflow);
+#ifdef HAL_ENC_TEST_REALISTIC
+    RUN_TEST(test_speed_one_full_output_revolution);
+    RUN_TEST(test_speed_half_revolution);
+#endif
+#ifdef HAL_ENC_TEST_OVERFLOW
+    RUN_TEST(test_speed_no_overflow_extreme_cpr);
+#endif
     TEST_SUITE_SUMMARY();
 }

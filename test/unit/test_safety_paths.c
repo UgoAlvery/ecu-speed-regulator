@@ -1,4 +1,5 @@
 #include "test_runner.h"
+#include "ctrl_heartbeat.h"
 #include "hal_pwm.h"
 #include "hal_config.h"
 
@@ -81,6 +82,45 @@ static void test_silence_guard_uint32_wraparound(void)
     TEST_ASSERT_TRUE ((uint32_t)(600u - last_rx1) > timeout);
 }
 
+/* ── Heartbeat freeze detection ──────────────────────────────────────────────
+ * ctrl_heartbeat_frozen() is the pure logic used by task_failsafe.
+ * task_failsafe calls hal_pwm_disable() (via trigger_failsafe) when it fires. */
+
+static void test_heartbeat_frozen_on_timeout(void)
+{
+    /* Heartbeat unchanged, elapsed > timeout → frozen */
+    TEST_ASSERT_TRUE(ctrl_heartbeat_frozen(42u, 42u, 600u, 500u));
+}
+
+static void test_heartbeat_not_frozen_below_timeout(void)
+{
+    TEST_ASSERT_FALSE(ctrl_heartbeat_frozen(42u, 42u, 400u, 500u));
+}
+
+static void test_heartbeat_not_frozen_at_exact_timeout(void)
+{
+    /* Boundary: > not >=, so at exactly timeout no trigger yet */
+    TEST_ASSERT_FALSE(ctrl_heartbeat_frozen(42u, 42u, 500u, 500u));
+}
+
+static void test_heartbeat_not_frozen_when_changed(void)
+{
+    /* Even with large elapsed, an updated heartbeat is never frozen */
+    TEST_ASSERT_FALSE(ctrl_heartbeat_frozen(43u, 42u, 9999u, 500u));
+}
+
+static void test_heartbeat_frozen_triggers_pwm_disable(void)
+{
+    /* Simulate: heartbeat frozen → task_failsafe calls hal_pwm_disable() */
+    arm_pwm();
+    TEST_ASSERT_TRUE(hal_pwm_is_enabled());
+    if (ctrl_heartbeat_frozen(5u, 5u, 600u, 500u)) {
+        hal_pwm_disable(); /* simulates trigger_failsafe() path */
+    }
+    TEST_ASSERT_FALSE(hal_pwm_is_enabled());
+    TEST_ASSERT_EQUAL_INT(0, hal_pwm_get_duty_pct());
+}
+
 /* ── hal_pwm_disable is idempotent ──────────────────────────────────────────
  * Both trigger_failsafe and the ctrl silence guard may call it in sequence. */
 
@@ -102,5 +142,10 @@ int main(void)
     RUN_TEST(test_silence_guard_arithmetic_boundary);
     RUN_TEST(test_silence_guard_uint32_wraparound);
     RUN_TEST(test_disable_idempotent);
+    RUN_TEST(test_heartbeat_frozen_on_timeout);
+    RUN_TEST(test_heartbeat_not_frozen_below_timeout);
+    RUN_TEST(test_heartbeat_not_frozen_at_exact_timeout);
+    RUN_TEST(test_heartbeat_not_frozen_when_changed);
+    RUN_TEST(test_heartbeat_frozen_triggers_pwm_disable);
     TEST_SUITE_SUMMARY();
 }

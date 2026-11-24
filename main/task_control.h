@@ -18,5 +18,8 @@ uint32_t task_control_get_count_tx_dropped(void);
 uint32_t task_control_get_count_rx_invalid(void);
 uint32_t task_control_get_count_mode_refused(void);
 uint32_t task_control_get_count_rx_out_of_range(void);
+/* Incremented at the top of every task_control loop iteration.
+ * Frozen for > CTRL_HEARTBEAT_TIMEOUT_MS triggers failsafe in task_failsafe. */
+uint32_t task_control_get_heartbeat(void);
 
 #endif //ECU_TASK_CONTROL_H

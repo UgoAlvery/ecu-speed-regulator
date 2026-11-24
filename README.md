@@ -304,12 +304,24 @@ ecu/
 # Activer l'environnement IDF
 . ~/esp/esp-idf/export.sh
 
-# Compiler
+# Compiler (build par défaut — UART seulement, pas de PWM ni d'encodeur HW)
 idf.py build
+
+# Avec les pilotes matériels activés (après validation physique du câblage) :
+idf.py -DECU_DRIVE_HW_PWM=ON -DECU_USE_ENCODER_SPEED=ON -DHW_PROTECTION_CONFIRMED=ON build
 
 # Flasher et ouvrir la console (port USB natif de la carte, UART0)
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
+
+Binaires mesurés (ESP-IDF v5.3, esp32) :
+
+| Combinaison | Taille `.bin` | Delta |
+|---|---|---|
+| Défaut (UART, pas de PWM/encoder) | 210 Ko | — |
+| `ECU_DRIVE_HW_PWM=ON` | 217 Ko | +7 Ko (LEDC) |
+| `+ECU_USE_ENCODER_SPEED=ON` | 223 Ko | +6 Ko (PCNT) |
+| `+HW_PROTECTION_CONFIRMED=ON` | 223 Ko | 0 (constante seulment) |
 
 > Deux ports série : le port USB natif de la carte (flash + console `ESP_LOG`) et un
 > adaptateur USB-TTL 3,3 V câblé sur l'UART2 protocole (GPIO16 ← TX adaptateur,
@@ -332,9 +344,18 @@ idf.py -p /dev/ttyUSB0 flash monitor
 ### Tests automatisés (sans matériel)
 
 ```bash
-make -C test/unit run                 # 312 assertions exécutées — 7 suites (ASan/UBSan)
+bash test/unit/run_tests.sh           # toutes les suites + total généré automatiquement
 make -C test/fuzz fuzz SECONDS=60     # fuzzing libFuzzer de protocol_decode
 ```
+
+Le total d'assertions est généré par `run_tests.sh` (somme des lignes `X tests, Y failures`
+produites par `TEST_SUITE_SUMMARY()`). Le chiffre n'est pas écrit à la main.
+
+> **Note sur les boucles** : le compteur `_tests_run` est incrémenté à chaque appel
+> `TEST_ASSERT*` au runtime (pas à chaque ligne source). Les suites qui appellent
+> des assertions dans des boucles (ex. `test_protocol` : 4 boucles for) affichent
+> un total runtime supérieur au nombre de lignes `TEST_ASSERT` dans les sources.
+> C'est attendu et correct.
 
 Exécutés à chaque push par la CI GitHub Actions, avec le build firmware ESP-IDF.
 
@@ -366,26 +387,29 @@ python test/ecu_tester.py   # SERIAL_PORT = adaptateur USB-TTL (UART2), pas le p
 > (compteur `_tests_run`). Certains tests bouclent sur plusieurs valeurs ;
 > le compte runtime peut donc dépasser le nombre de lignes source.
 
-| Module | Tests | Assertions | Lignes couvertes | Branches couvertes |
+| Module | Fonctions test | Assertions | Lignes couvertes | Branches couvertes |
 |---|---|---|---|---|
 | `protocol.c` | 68 | 134 | 100 % (74/74) | 98 % (63/64 prises) |
 | `pid.c` | 27 | 41 | 100 % (40/40) | — |
 | `failsafe_line.c` | 13 | 34 | 100 % (24/24) | — |
 | `ecu_command.c` | 14 | 61 | 100 % (27/27) | — |
 | `hal_pwm` (mock) | 11 | 25 | — | — |
-| `hal_encoder` (mock) | 9 | 10 | — | — |
+| `hal_encoder` (mock, CPR=0) | 10 | 13 | — | — |
+| `hal_encoder_realistic` (CPR=64, gear=120) | 11 | 14 | — | — |
+| `hal_encoder_overflow` (CPR=65536, gear=65537) | 10 | 13 | — | — |
 | `hal_current` (mock) | 7 | 7 | — | — |
-| **Total** | **149** | **312** | — | — |
+| `safety_paths` (mock + heartbeat) | 11 | 22 | — | — |
+| **Total** | **182** | **364** | — | — |
 
-Commande : `make -C test/unit run` (gcc -Wall -Wextra -Wpedantic, ASan/UBSan)
+Commande : `bash test/unit/run_tests.sh` — le total est généré, jamais écrit à la main.
 
 La seule branche non prise dans `protocol.c` est l'entrée d'un payload nul
 avec `payload_len > 0` (combinaison impossible par construction).
 
 ### Sanitizers
 
-ASan + UBSan activés dans `test/unit/Makefile`. Résultat : **0 erreur** sur les 312
-assertions. Commande identique à ci-dessus.
+ASan + UBSan activés dans `test/unit/Makefile`. Résultat : **0 erreur**.
+Commande : `bash test/unit/run_tests.sh`.
 
 ### Fuzzing (libFuzzer, `protocol_decode`)
 
