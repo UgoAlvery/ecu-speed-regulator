@@ -22,3 +22,6 @@ __pycache__/
 *.docx
 *.xlsx
 *.pptx
+
+# Runtime logs (ecu_tester.py output, timing CSV captures)
+logs/
