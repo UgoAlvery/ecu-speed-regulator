@@ -332,7 +332,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 ### Tests automatisés (sans matériel)
 
 ```bash
-make -C test/unit run                 # 349 assertions protocol.c, pid.c, failsafe_line.c, ecu_command.c (ASan/UBSan)
+make -C test/unit run                 # 312 assertions exécutées — 7 suites (ASan/UBSan)
 make -C test/fuzz fuzz SECONDS=60     # fuzzing libFuzzer de protocol_decode
 ```
 
@@ -358,9 +358,13 @@ python test/ecu_tester.py   # SERIAL_PORT = adaptateur USB-TTL (UART2), pas le p
 
 ---
 
-## Résultats de qualité (hôte, 2026-11-12)
+## Résultats de qualité (hôte, 2026-11-24)
 
 ### Tests et couverture
+
+> **Assertions** = nombre d'appels à `TEST_ASSERT*` exécutés au runtime
+> (compteur `_tests_run`). Certains tests bouclent sur plusieurs valeurs ;
+> le compte runtime peut donc dépasser le nombre de lignes source.
 
 | Module | Tests | Assertions | Lignes couvertes | Branches couvertes |
 |---|---|---|---|---|
@@ -368,7 +372,10 @@ python test/ecu_tester.py   # SERIAL_PORT = adaptateur USB-TTL (UART2), pas le p
 | `pid.c` | 27 | 41 | 100 % (40/40) | — |
 | `failsafe_line.c` | 13 | 34 | 100 % (24/24) | — |
 | `ecu_command.c` | 14 | 61 | 100 % (27/27) | — |
-| **Total** | **122** | **349** | **100 %** | — |
+| `hal_pwm` (mock) | 11 | 25 | — | — |
+| `hal_encoder` (mock) | 9 | 10 | — | — |
+| `hal_current` (mock) | 7 | 7 | — | — |
+| **Total** | **149** | **312** | — | — |
 
 Commande : `make -C test/unit run` (gcc -Wall -Wextra -Wpedantic, ASan/UBSan)
 
@@ -377,7 +384,7 @@ avec `payload_len > 0` (combinaison impossible par construction).
 
 ### Sanitizers
 
-ASan + UBSan activés dans `test/unit/Makefile`. Résultat : **0 erreur** sur les 270
+ASan + UBSan activés dans `test/unit/Makefile`. Résultat : **0 erreur** sur les 312
 assertions. Commande identique à ci-dessus.
 
 ### Fuzzing (libFuzzer, `protocol_decode`)
