@@ -10,9 +10,9 @@
 
 static const char *TAG = "ENC";
 
-static pcnt_unit_handle_t s_unit  = NULL;
-static pcnt_chan_handle_t  s_chan0 = NULL;
-static pcnt_chan_handle_t  s_chan1 = NULL;
+static pcnt_unit_handle_t    s_unit  = NULL;
+static pcnt_channel_handle_t s_chan0 = NULL;
+static pcnt_channel_handle_t s_chan1 = NULL;
 static bool s_initialized = false;
 
 bool hal_encoder_init(void)
@@ -94,7 +94,8 @@ float hal_encoder_get_speed_kmh(const float dt_s)
 
     const float output_revs_per_s =
         (float)raw /
-        (float)(HAL_ENC_PULSES_PER_MOTOR_REV * HAL_ENC_GEAR_RATIO) /
+        (float)((uint64_t)HAL_ENC_PULSES_PER_MOTOR_REV *
+                (uint64_t)HAL_ENC_GEAR_RATIO) /
         dt_s;
     return output_revs_per_s * HAL_ENC_WHEEL_CIRC_M * 3600.0f;
 }

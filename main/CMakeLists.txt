@@ -15,5 +15,5 @@ idf_component_register(
         "hal_encoder_esp32.c"
         "hal_pwm_esp32.c"
         INCLUDE_DIRS "."
-        REQUIRES driver
+        REQUIRES driver esp_timer
 )
