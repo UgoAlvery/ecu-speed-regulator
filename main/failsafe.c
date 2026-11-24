@@ -15,6 +15,11 @@
 #include "task_timing.h"
 #include "task_tx.h"
 
+#if ECU_DRIVE_HW_PWM
+#include "hal_pwm.h"
+#include "hal_config.h"
+#endif
+
 
 /* Ligne failsafe en contact normalement fermé (NC) : jumper GPIO4 → GND,
  * pull-up interne. Repos = 0, ouverture (jumper retiré OU fil coupé) = 1.
@@ -80,6 +85,9 @@ static void update_led(void)
 static void trigger_failsafe(const char *cause, const bool lock)
 {
     timing_record_failsafe_trigger();
+#if ECU_DRIVE_HW_PWM
+    hal_pwm_disable();  /* force 0% before state change — hardware-level guarantee */
+#endif
     if (!ecu_state_enter_failsafe(lock, task_tx_emit_output, s_tx_queue)) {
         s_count_output_dropped++;
     }

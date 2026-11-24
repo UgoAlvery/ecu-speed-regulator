@@ -8,6 +8,13 @@
 
 #if ECU_USE_ENCODER_SPEED
 #include "hal_encoder.h"
+#endif
+
+#if ECU_DRIVE_HW_PWM
+#include "hal_pwm.h"
+#endif
+
+#if ECU_USE_ENCODER_SPEED || ECU_DRIVE_HW_PWM
 #include "hal_config.h"
 #endif
 
@@ -222,4 +229,15 @@ static void emit_output(const float requested)
          * §4.3). Le compteur tx_dropped remonte via STATS. */
         s_count_tx_dropped++;
     }
+#if ECU_DRIVE_HW_PWM
+    /* Map PID output [0, PID_DEFAULT_OUT_MAX] to duty [0, 10000].
+     * hal_pwm_set_duty_pct is a no-op when PWM is disabled (failsafe path). */
+    {
+        const float norm = requested / PID_DEFAULT_OUT_MAX;
+        const uint16_t duty = (uint16_t)(norm > 1.0f ? 10000u
+                                       : (norm < 0.0f ? 0u
+                                       : (uint16_t)(norm * 10000.0f)));
+        hal_pwm_set_duty_pct(duty);
+    }
+#endif
 }

@@ -13,6 +13,7 @@ idf_component_register(
         "failsafe.c"
         "failsafe_line.c"
         "hal_encoder_esp32.c"
+        "hal_pwm_esp32.c"
         INCLUDE_DIRS "."
         REQUIRES driver
 )
