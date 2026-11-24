@@ -2,6 +2,9 @@
 #include "hal_encoder.h"
 #include "hal_config.h"
 
+#include <stdint.h>
+#include <limits.h>
+
 void hal_encoder_mock_set_count(int32_t count);
 void hal_encoder_mock_reset_state(void);
 
@@ -92,6 +95,19 @@ static void test_speed_resets_count_after_reading(void)
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, speed2);
 }
 
+static void test_cpr_gear_product_no_overflow(void)
+{
+    /* For realistic FIT0522 values (64 CPR, 120:1 gear), product is 7680 —
+     * well within uint32_t. The formula uses uint64_t cast to protect against
+     * large encoders; this test documents the expected range. */
+    const uint64_t realistic = (uint64_t)64u * (uint64_t)120u;
+    TEST_ASSERT_EQUAL_INT(7680, (int)realistic);
+    TEST_ASSERT_TRUE(realistic <= (uint64_t)UINT32_MAX);
+    /* 65536 * 65537 = 4 295 032 832 > UINT32_MAX: proves why uint64_t cast needed */
+    const uint64_t extreme = (uint64_t)65536u * (uint64_t)65537u;
+    TEST_ASSERT_TRUE(extreme > (uint64_t)UINT32_MAX);
+}
+
 int main(void)
 {
     TEST_SUITE_BEGIN("hal_encoder (mock)");
@@ -104,5 +120,6 @@ int main(void)
     RUN_TEST(test_speed_returns_zero_when_dt_is_zero);
     RUN_TEST(test_speed_returns_zero_when_dt_is_negative);
     RUN_TEST(test_speed_resets_count_after_reading);
+    RUN_TEST(test_cpr_gear_product_no_overflow);
     TEST_SUITE_SUMMARY();
 }

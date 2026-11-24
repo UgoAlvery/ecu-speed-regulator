@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <limits.h>
 
 /* ── Safety guard ──────────────────────────────────────────────────────────
  * Set to true ONLY after physically installing the blade fuse (in series
@@ -22,6 +23,15 @@
 /* Wheel circumference in metres for km/h conversion.
  * TODO(datasheet): measure wheel + tyre fitted to the test bench. */
 #define HAL_ENC_WHEEL_CIRC_M          0.0f /* TODO(datasheet) */
+
+/* Guard: CPR * gear must fit in uint32_t (the formula uses uint64_t cast, but
+ * float precision is lost above ~16M). Fires only when both are non-zero. */
+#if HAL_ENC_PULSES_PER_MOTOR_REV != 0 && HAL_ENC_GEAR_RATIO != 0
+_Static_assert(
+    (uint64_t)HAL_ENC_PULSES_PER_MOTOR_REV * HAL_ENC_GEAR_RATIO <= UINT32_MAX,
+    "HAL_ENC_PULSES_PER_MOTOR_REV * HAL_ENC_GEAR_RATIO overflows uint32_t"
+);
+#endif
 
 /* ── Current sensor ────────────────────────────────────────────────────────
  * TODO(datasheet): set to the motor's rated stall current in mA.
